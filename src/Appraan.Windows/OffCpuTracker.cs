@@ -408,8 +408,27 @@ public sealed class OffCpuTracker
     {
         ThreadState.Wait => WaitReasonLabel(reason),
         ThreadState.Ready => "Preempted",
-        _ => state.ToString(),
+        _ => StateLabel(state),
     };
+
+    /// <summary>
+    /// The label for a non-wait, non-ready switch-out state: the enum's own
+    /// name when it has one, else the KTHREAD_STATE name for values the
+    /// <see cref="ThreadState"/> enum does not define (observed live on
+    /// Windows 11: 9 = WaitingForProcessInSwap, which
+    /// <c>ThreadState.ToString()</c> would render as a bare "9"), else the
+    /// numeric <c>ThreadState(&lt;n&gt;)</c> form rather than a guessed name.
+    /// </summary>
+    private static string StateLabel(ThreadState state)
+    {
+        if (Enum.GetName(state) is { } name)
+            return name;
+        return (int)state switch
+        {
+            9 => "WaitingForProcessInSwap", // KTHREAD_STATE (WDK)
+            var value => $"ThreadState({value})",
+        };
+    }
 
     /// <summary>
     /// NT KWAIT_REASON names, by integer value. The TraceEvent
