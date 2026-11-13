@@ -2,15 +2,15 @@ using System.Globalization;
 using System.Text;
 using Appraan.Windows;
 
-// winagent — the Appraan sidecar (Appraan.Windows integration step).
-// Usage: winagent <PID> [--out <path>] [--push <url>]
+// appraanagent — the Appraan sidecar (Appraan.Windows integration step).
+// Usage: appraanagent <PID> [--out <path>] [--push <url>]
 //                 [--seconds N] [--interval S] [--registry]
 // At least one of --out / --push is required.
 //
 // Why this exists: Windows allows effectively ONE NT Kernel Logger
 // session ("AppraanSession"), and every Appraan.Windows tool stops any
 // stale session when it starts — so winops + wintcplife + winoffcpu can
-// NOT run side by side as separate processes. winagent is the single ETW
+// NOT run side by side as separate processes. appraanagent is the single ETW
 // consumer for a PID: it hosts all three library trackers (OpsTracker,
 // TcpConnectionTracker, OffCpuTracker) in one KernelSession and, every
 // interval, publishes one JSON snapshot document to its sinks:
@@ -26,13 +26,13 @@ using Appraan.Windows;
 //                 option, and that serves as the run's evidence.
 //
 // The split is also an elevation split — ETW needs an elevated process,
-// Appraan's Attach API wants the target's own user — so winagent runs
+// Appraan's Attach API wants the target's own user — so appraanagent runs
 // elevated in its own window and Appraan never elevates.
 //
 // Without --seconds it runs until Ctrl+C. Must be run elevated
 // (KernelSession explains why if not).
 
-const string Usage = "usage: winagent <PID> [--out <path>] [--push <url>] [--seconds N] [--interval S] [--registry]";
+const string Usage = "usage: appraanagent <PID> [--out <path>] [--push <url>] [--seconds N] [--interval S] [--registry]";
 
 int? targetPid = null;
 string? outPath = null;
@@ -130,7 +130,7 @@ try
     catch (InvalidOperationException ex) when (registryRequested && !IsElevationError(ex))
     {
         // Same rule as winops: registry must never break the core tool.
-        Console.Error.WriteLine($"winagent: could not enable registry tracing ({ex.Message}); continuing without Registry counts.");
+        Console.Error.WriteLine($"appraanagent: could not enable registry tracing ({ex.Message}); continuing without Registry counts.");
         session.Dispose();
         registryActive = false;
         session = new KernelSession(groups & ~KernelGroups.Registry);
@@ -142,7 +142,7 @@ try
 }
 catch (Exception ex) when (ex is InvalidOperationException or PlatformNotSupportedException)
 {
-    Console.Error.WriteLine($"winagent: {ex.Message}");
+    Console.Error.WriteLine($"appraanagent: {ex.Message}");
     return 1;
 }
 
@@ -157,13 +157,13 @@ Console.CancelKeyPress += (_, e) =>
 var processing = Task.Run(() => session.ProcessEvents(cts.Token));
 
 string limit = seconds > 0 ? $"for {seconds}s" : "until Ctrl+C";
-Console.WriteLine($"winagent: watching pid {pid} {limit} " +
+Console.WriteLine($"appraanagent: watching pid {pid} {limit} " +
                   $"(session '{KernelSession.SessionName}', registry: {(registryActive ? "on" : "off")}).");
-Console.WriteLine($"winagent: publishing snapshots every {interval}s:");
+Console.WriteLine($"appraanagent: publishing snapshots every {interval}s:");
 if (pushUrl is not null)
-    Console.WriteLine($"winagent:   push -> {pushUrl}");
+    Console.WriteLine($"appraanagent:   push -> {pushUrl}");
 if (outPath is not null)
-    Console.WriteLine($"winagent:   file -> {outPath}");
+    Console.WriteLine($"appraanagent:   file -> {outPath}");
 
 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -190,7 +190,7 @@ async Task PublishSnapshot()
             await KernelPush.PostAsync(http, pushUrl, json);
             if (pushFailStreak > 0)
             {
-                Console.WriteLine($"winagent: push to {pushUrl} recovered " +
+                Console.WriteLine($"appraanagent: push to {pushUrl} recovered " +
                                   $"after {pushFailStreak} failed attempt(s).");
                 pushFailStreak = 0;
             }
@@ -203,7 +203,7 @@ async Task PublishSnapshot()
             pushFailStreak++;
             if (pushFailStreak == 1)
                 Console.Error.WriteLine(
-                    $"winagent: push to {pushUrl} failed ({ex.GetType().Name}: {ex.Message}); " +
+                    $"appraanagent: push to {pushUrl} failed ({ex.GetType().Name}: {ex.Message}); " +
                     "retrying each interval — snapshots are cumulative, the next success self-heals.");
         }
     }
@@ -245,7 +245,7 @@ catch (TaskCanceledException)
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"winagent: snapshot publish failed: {ex.Message}");
+    Console.Error.WriteLine($"appraanagent: snapshot publish failed: {ex.Message}");
     session.Stop();
     await processing;
     return 1;
@@ -258,7 +258,7 @@ finally
 await processing;
 
 await PublishSnapshot(); // final publish at exit, with the complete totals
-Console.WriteLine($"winagent: done — final snapshot published " +
+Console.WriteLine($"appraanagent: done — final snapshot published " +
                   $"after ~{stopwatch.Elapsed.TotalSeconds:0}s.");
 return 0;
 

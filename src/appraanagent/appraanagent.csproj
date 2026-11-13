@@ -6,8 +6,8 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>Winagent</RootNamespace>
-    <AssemblyName>winagent</AssemblyName>
+    <RootNamespace>Appraanagent</RootNamespace>
+    <AssemblyName>appraanagent</AssemblyName>
     <Description>The Appraan sidecar: hosts the ops, TCP-life and off-CPU trackers in ONE kernel ETW session for one PID and publishes a JSON snapshot file that Appraan (Java) polls as its Windows kernel collector, via Appraan.Windows.</Description>
   </PropertyGroup>
 

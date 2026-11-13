@@ -562,9 +562,9 @@ Enter**. winload runs its normal loop, then prints
 Paste the final winops summary back to Muse Ram — the Disk row and its
 `kinds:` line are the verdict.
 
-# Integration — winagent (the Appraan sidecar)
+# Integration — appraanagent (the Appraan sidecar)
 
-`winagent` is how the four tools above plug into **Appraan** (the Java
+`appraanagent` is how the four tools above plug into **Appraan** (the Java
 tool). It runs all three trackers — ops (`winops`), TCP life
 (`wintcplife`), off-CPU (`winoffcpu`) — inside **one** kernel session
 for one PID. That is not a style choice: Windows allows effectively one
@@ -585,7 +585,7 @@ document on both sinks):
   its `--kernel-file` option, and that doubles as the run's evidence.
   Use both sinks together when you want the live UI *and* the recording.
 
-At least one of `--out` / `--push` is required. winagent is the
+At least one of `--out` / `--push` is required. appraanagent is the
 elevated half of Appraan on Windows — run it from an **admin
 PowerShell**; Appraan itself never needs elevation (its Attach API
 wants the target's own user).
@@ -597,21 +597,21 @@ same PID in its own window; see the Appraan repo for the full
 three-window test):
 
 ```powershell
-dotnet run -c Release --project .\src\winagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --seconds 60
+dotnet run -c Release --project .\src\appraanagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --seconds 60
 ```
 
 Fallback flow — record to a file instead (Appraan side then runs with
 `--kernel-file %TEMP%\appraan-kernel.json`):
 
 ```powershell
-dotnet run -c Release --project .\src\winagent -- <pid> --out %TEMP%\appraan-kernel.json --seconds 60
+dotnet run -c Release --project .\src\appraanagent -- <pid> --out %TEMP%\appraan-kernel.json --seconds 60
 ```
 
 For a realtime feel in Appraan's UI mode (`--seconds 0`), publish more
 often — **`--interval 2`** pairs well with it:
 
 ```powershell
-dotnet run -c Release --project .\src\winagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --interval 2
+dotnet run -c Release --project .\src\appraanagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --interval 2
 ```
 
 ## What success looks like
@@ -629,7 +629,7 @@ dotnet run -c Release --project .\src\winagent -- <pid> --push http://127.0.0.1:
 
 | Symptom | Fix |
 |---|---|
-| `usage: winagent <PID> ...` (exit 2) | A PID and at least one of `--out` / `--push` are required. |
-| `winagent: ... requires an elevated process` | Re-run from an admin PowerShell — ETW kernel sessions need elevation. |
+| `usage: appraanagent <PID> ...` (exit 2) | A PID and at least one of `--out` / `--push` are required. |
+| `appraanagent: ... requires an elevated process` | Re-run from an admin PowerShell — ETW kernel sessions need elevation. |
 | `push ... failed (HttpRequestException ...)` warnings | Appraan's UI isn't up yet, or the port differs (`--port` on the Appraan side). The agent keeps running; pushes self-heal when the UI appears. |
 | Kernel panel in Appraan says "stale" | Snapshots stopped arriving — check the agent window is still running and the interval/seconds haven't expired. |

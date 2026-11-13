@@ -1,6 +1,10 @@
 # Appraan.Windows — STATUS
 
-## Integration: winagent (the Appraan sidecar) — BUILT, compile-verified 2026-11-13; runtime verification pending
+## Integration: appraanagent (the Appraan sidecar) — BUILT, compile-verified 2026-11-13; runtime verification pending
+
+(Renamed from winagent to **appraanagent** at the user's direction,
+2026-11-13, in a dedicated rename commit. The JSON snapshot contract
+is unchanged by the rename.)
 
 The standalone tools become Appraan's Windows kernel collector. Design
 constraints that shaped it (all confirmed against the existing code):
@@ -8,11 +12,11 @@ constraints that shaped it (all confirmed against the existing code):
 - Windows allows effectively ONE NT Kernel Logger session
   ("AppraanSession") and every tool stops any stale session on start —
   so winops + wintcplife + winoffcpu cannot run concurrently as
-  separate processes. `src/winagent` is a single process hosting
+  separate processes. `src/appraanagent` is a single process hosting
   OpsTracker + TcpConnectionTracker + OffCpuTracker in one
   KernelSession (groups: KernelGroups.All, plus opt-in Registry with
   winops' fallback-if-it-fails behaviour).
-- Elevation split: winagent runs elevated (ETW); Appraan (Attach API,
+- Elevation split: appraanagent runs elevated (ETW); Appraan (Attach API,
   same-user) never elevates. The two meet over the snapshot document.
 - Sinks (user design amendment): `--push <url>` POSTs the snapshot to
   Appraan's UI ingest endpoint (primary; failures never stop the agent —
@@ -45,8 +49,8 @@ Verification on this (Linux) VM — ETW cannot run here, so:
   curl is unaffected. KernelPush is a single POST +
   EnsureSuccessStatusCode, compile-verified; the receiving side
   (Appraan's ingest endpoint) IS live-verified in Appraan's proof run4
-  via curl, and the full winagent→Appraan loop is the user's two-window
-  Windows test (RUNBOOK "Integration — winagent").
+  via curl, and the full appraanagent→Appraan loop is the user's two-window
+  Windows test (RUNBOOK "Integration — appraanagent").
 
 ## Step 4: winoffcpu (off-CPU analysis) — RUNTIME VERIFIED 2026-11-13
 
