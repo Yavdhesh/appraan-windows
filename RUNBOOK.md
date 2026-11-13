@@ -48,12 +48,13 @@ https://dotnet.microsoft.com/en-us/download/dotnet/8.0 and run it.
 
 ## Step 1 — get the code
 
-```
-code delivery — to be arranged (GitHub repo)
+```powershell
+git clone https://github.com/Yavdhesh/appraan-windows.git
+cd appraan-windows
 ```
 
-Once delivered, `cd` into the `appraan-windows` folder (the one containing
-`Appraan.Windows.sln`).
+(Public repo — no login needed to clone. If `git` is not installed:
+`winget install Git.Git`, reopen PowerShell, retry.)
 
 ## Step 2 — build
 
