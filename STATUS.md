@@ -152,3 +152,15 @@ the RUNBOOK.md smoke test passes on the user's Windows 11 machine
   total 754 events for the target PID out of 256,921 session-wide in ~11 s.
   Per-PID filtering confirmed working against the full kernel firehose.
 - Step 1 is now DONE per the project verification rule (real run, known workload).
+
+## Step 2 RE-VERIFIED — 2026-11-13 (user's Windows 11, winload pid 42492)
+- 262 connections closed = exactly 2 per iteration (client + accepted server),
+  winload ran 131 iterations in the window.
+- Bytes EXACT: TX 8384 B = RX 8384 B = 262 x 32 B (winload's known payload).
+  Every record 0.03/0.03 KB. No phantom lines. Unmatched disconnects: 0.
+  Still open at end: 0.
+- Durations: most 0.1-1.2 ms; a minority of server-side (passive-close) records
+  show ~300-321 ms — real Windows loopback teardown delay on the passive side,
+  not a tracker artefact (byte totals and counts are exact; 300 ms is not an
+  iteration-period multiple).
+- Step 2 (wintcplife) is DONE per the verification rule.
