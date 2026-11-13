@@ -1,13 +1,32 @@
 using System.Globalization;
 using System.IO.Compression;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Appraan.Windows;
 
 // appraanagent — the Appraan sidecar (Appraan.Windows integration step).
 // Usage: appraanagent <PID> [--out <path>] [--push <url>]
 //                 [--seconds N] [--interval S] [--registry]
+//                 [--key-file <path>] [--tls-cert <path>] [--label k=v]…
+//        appraanagent --gen-key <path>
 // At least one of --out / --push is required.
+//
+// Feed transport & security (DEFAULT: literal plain JSON over HTTP —
+// no compression, no encryption. Everything else is opt-in — see
+// Appraan's README, "Kernel feed transport & security configuration"):
+//   --gzip             Gzip-compress the push body (smallest size).
+//   --key-file <path>  AES-256-GCM shared key (base64 of 32 bytes, one
+//                      line): the push body becomes an encrypted
+//                      envelope over the JSON (gzipped first only when
+//                      --gzip is also given). The --out file stays plain.
+//   --gen-key <path>   Write a fresh random key file and exit.
+//   --tls-cert <path>  For https:// push URLs: trust exactly this server
+//                      certificate (.cer DER or PEM), nothing else.
+//   --label k=v        Pod/centre-collector foresight: repeatable labels
+//                      attached to every snapshot (plus "host", filled
+//                      automatically with this machine's name).
 //
 // Why this exists: Windows allows effectively ONE NT Kernel Logger
 // session ("AppraanSession"), and every Appraan.Windows tool stops any
@@ -34,11 +53,32 @@ using Appraan.Windows;
 // Without --seconds it runs until Ctrl+C. Must be run elevated
 // (KernelSession explains why if not).
 
-const string Usage = "usage: appraanagent <PID> [--out <path>] [--push <url>] [--seconds N] [--interval S] [--registry]";
+const string Usage = "usage: appraanagent <PID> [--out <path>] [--push <url>] [--seconds N] [--interval S] [--registry] [--gzip] [--key-file <path>] [--tls-cert <path>] [--label k=v]...\n" +
+                     "       appraanagent --gen-key <path>";
+
+// --gen-key stands alone: create a key file and exit (works anywhere,
+// no PID, no elevation, no ETW).
+for (int i = 0; i < args.Length; i++)
+{
+    if (args[i] == "--gen-key" && i + 1 < args.Length)
+    {
+        string keyPath = args[i + 1];
+        File.WriteAllText(keyPath,
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) + "\n");
+        Console.WriteLine($"appraanagent: wrote a fresh 256-bit key to {keyPath}");
+        Console.WriteLine("appraanagent: keep it secret — pass it to this agent with --key-file " +
+                          "and to Appraan with --kernel-key-file.");
+        return 0;
+    }
+}
 
 int? targetPid = null;
 string? outPath = null;
 string? pushUrl = null;
+string? keyFile = null;
+string? tlsCertPath = null;
+bool gzipPush = false;   // opt-in; default is literal plain JSON
+var labels = new SortedDictionary<string, string>(StringComparer.Ordinal);
 int seconds = 0;   // 0 = until Ctrl+C
 int interval = 5;  // seconds between snapshot publishes
 bool registryRequested = false;
@@ -52,6 +92,28 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--push" && i + 1 < args.Length)
     {
         pushUrl = args[i + 1];
+        i++;
+    }
+    else if (args[i] == "--key-file" && i + 1 < args.Length)
+    {
+        keyFile = args[i + 1];
+        i++;
+    }
+    else if (args[i] == "--tls-cert" && i + 1 < args.Length)
+    {
+        tlsCertPath = args[i + 1];
+        i++;
+    }
+    else if (args[i] == "--label" && i + 1 < args.Length)
+    {
+        string kv = args[i + 1];
+        int eq = kv.IndexOf('=');
+        if (eq <= 0)
+        {
+            Console.Error.WriteLine(Usage);
+            return 2;
+        }
+        labels[kv[..eq]] = kv[(eq + 1)..];
         i++;
     }
     else if (args[i] == "--seconds" && i + 1 < args.Length && int.TryParse(args[i + 1], out int s) && s > 0)
@@ -68,6 +130,10 @@ for (int i = 0; i < args.Length; i++)
     {
         registryRequested = true;
     }
+    else if (args[i] == "--gzip")
+    {
+        gzipPush = true;
+    }
     else if (targetPid is null && int.TryParse(args[i], out int p) && p > 0)
     {
         targetPid = p;
@@ -82,6 +148,42 @@ if (targetPid is not int pid || (outPath is null && pushUrl is null))
 {
     Console.Error.WriteLine(Usage);
     return 2;
+}
+
+// Shared-key mode: load + validate the key up front (fail fast, before
+// any ETW session starts).
+byte[]? pushKey = null;
+if (keyFile is not null)
+{
+    try
+    {
+        pushKey = Convert.FromBase64String(File.ReadAllText(keyFile).Trim());
+        if (pushKey.Length != 32)
+            throw new FormatException($"expected 32 key bytes, got {pushKey.Length}");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"appraanagent: cannot load key file '{keyFile}': {ex.Message}");
+        return 2;
+    }
+}
+
+// TLS pinning: load the one certificate the push endpoint must present.
+X509Certificate2? pinnedCert = null;
+if (tlsCertPath is not null)
+{
+    try
+    {
+        string text = File.ReadAllText(tlsCertPath);
+        pinnedCert = text.StartsWith("-----BEGIN", StringComparison.Ordinal)
+            ? X509Certificate2.CreateFromPem(text)
+            : new X509Certificate2(File.ReadAllBytes(tlsCertPath));
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"appraanagent: cannot load TLS certificate '{tlsCertPath}': {ex.Message}");
+        return 2;
+    }
 }
 
 string? tempPath = null;
@@ -163,15 +265,40 @@ Console.WriteLine($"appraanagent: watching pid {pid} {limit} " +
                   $"(session '{KernelSession.SessionName}', registry: {(registryActive ? "on" : "off")}).");
 Console.WriteLine($"appraanagent: publishing snapshots every {interval}s:");
 if (pushUrl is not null)
-    Console.WriteLine($"appraanagent:   push -> {pushUrl}");
+{
+    Console.WriteLine($"appraanagent:   push -> {pushUrl}" +
+                      (pinnedCert is not null ? " (pinned server cert)" : ""));
+    // State the effective feed mode plainly (never any key material).
+    Console.WriteLine(pushKey is not null
+        ? $"appraanagent: kernel feed: AES-256-GCM encrypted envelope ({(gzipPush ? "gzip" : "plain JSON")} inside)."
+        : gzipPush
+            ? "appraanagent: kernel feed: gzip-compressed JSON (no encryption)."
+            : "appraanagent: kernel feed: plain JSON over HTTP (no encryption).");
+}
 if (outPath is not null)
     Console.WriteLine($"appraanagent:   file -> {outPath}");
 
 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
 // Short timeout: a wedged consumer must never stall the publish loop —
-// the next interval's snapshot supersedes this one anyway.
-using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+// the next interval's snapshot supersedes this one anyway. With
+// --tls-cert, the handler trusts exactly that one certificate (raw-byte
+// comparison); without it, https push URLs use normal system trust.
+HttpClient http;
+if (pinnedCert is not null)
+{
+    var handler = new HttpClientHandler
+    {
+        ServerCertificateCustomValidationCallback = (_, cert, _, _) =>
+            cert is not null && cert.GetRawCertData().SequenceEqual(pinnedCert.GetRawCertData()),
+    };
+    http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
+}
+else
+{
+    http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+}
+using var httpScope = http;
 int pushFailStreak = 0;
 
 async Task PublishSnapshot()
@@ -189,7 +316,7 @@ async Task PublishSnapshot()
             // No caller token: the HttpClient timeout bounds the attempt,
             // and the final publish at exit must still go out after Ctrl+C
             // has cancelled the loop's token.
-            await KernelPush.PostAsync(http, pushUrl, json);
+            await KernelPush.PostAsync(http, pushUrl, json, pushKey, gzipPush);
             if (pushFailStreak > 0)
             {
                 Console.WriteLine($"appraanagent: push to {pushUrl} recovered " +
@@ -221,6 +348,7 @@ string BuildSnapshot()
         return KernelJson.Build(
             pid, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             stopwatch.Elapsed.TotalSeconds,
+            Environment.MachineName, labels,
             ops, diag, offCpu,
             tcpClosedTotal, tcpTxBytes, tcpRxBytes,
             tcpTracker.OpenCount, tcpTracker.UnmatchedDisconnects,
@@ -277,6 +405,7 @@ internal static class KernelJson
 {
     public static string Build(
         int pid, long tEpochMs, double windowSeconds,
+        string host, IReadOnlyDictionary<string, string> labels,
         OpsStats ops, OpsDiagnostics diag, ProcessOffCpuStats offCpu,
         long tcpClosedTotal, long tcpTxBytes, long tcpRxBytes,
         int tcpStillOpen, long tcpUnmatchedDisconnects,
@@ -286,6 +415,21 @@ internal static class KernelJson
         sb.Append("{\"pid\":").Append(pid);
         sb.Append(",\"tEpochMs\":").Append(tEpochMs);
         sb.Append(",\"windowSeconds\":").Append(Num(windowSeconds));
+        // Optional pod/collector foresight fields: the producing host and
+        // free-form labels. Consumers must treat both as optional.
+        sb.Append(",\"host\":").Append(Str(host));
+        if (labels.Count > 0)
+        {
+            sb.Append(",\"labels\":{");
+            bool firstLabel = true;
+            foreach (var kv in labels)
+            {
+                if (!firstLabel) sb.Append(',');
+                firstLabel = false;
+                sb.Append(Str(kv.Key)).Append(':').Append(Str(kv.Value));
+            }
+            sb.Append('}');
+        }
 
         // ---- ops: operations by category, with latency where reported ----
         sb.Append(",\"ops\":{\"categories\":[");
@@ -453,30 +597,77 @@ internal static class KernelJson
 }
 
 /// <summary>
-/// POSTs one snapshot document to Appraan's ingest endpoint. The body is
-/// the same JSON the file sink writes, gzip-compressed at the smallest
-/// size (feed format decision: JSON stays; push travels compressed —
-/// Content-Type: application/json, Content-Encoding: gzip). The file
-/// sink stays plain text: it is the human-readable recorder. Kept as a
-/// separate unit (like <see cref="KernelJson"/>) so the failure semantics
-/// live in exactly one place: any failure — connection refused, timeout,
-/// non-2xx — surfaces as an exception for the caller's streak handling;
-/// nothing here retries or swallows.
+/// POSTs one snapshot document to Appraan's ingest endpoint. The DEFAULT
+/// body is the literal plain JSON (Content-Type: application/json, no
+/// encoding, no encryption) — the out-of-the-box feed is plain JSON over
+/// HTTP. Opt-in layers, in pipeline order:
+///   --gzip      gzip-compress the JSON at the smallest size first
+///               (Content-Encoding: gzip on the plain path).
+///   --key-file  seal the (possibly gzipped) bytes in an AES-256-GCM
+///               envelope — [0x01 version][flags][12-byte random nonce]
+///               [ciphertext+tag] — sent as application/octet-stream.
+///               flags bit0 records whether the sealed payload was
+///               gzipped; the two header bytes are GCM AAD, so header
+///               tampering fails decryption.
+/// The file sink stays plain text in every mode: it is the
+/// human-readable recorder. Kept as a separate unit (like
+/// <see cref="KernelJson"/>) so the failure semantics live in exactly
+/// one place: any failure — connection refused, timeout, non-2xx —
+/// surfaces as an exception for the caller's streak handling; nothing
+/// here retries or swallows.
 /// </summary>
 internal static class KernelPush
 {
-    public static async Task PostAsync(HttpClient client, string url, string json)
+    /// <summary>
+    /// Builds the exact wire body for one snapshot per the mode flags.
+    /// Extracted from the POST so the byte format is testable without a
+    /// network.
+    /// </summary>
+    public static (byte[] Body, string ContentType, string? ContentEncoding) BuildBody(
+        string json, byte[]? key, bool gzip)
     {
-        byte[] plain = Encoding.UTF8.GetBytes(json);
-        using var ms = new MemoryStream();
-        using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
+        byte[] payload = Encoding.UTF8.GetBytes(json);
+        if (gzip)
         {
-            gz.Write(plain, 0, plain.Length);
+            using var ms = new MemoryStream();
+            using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
+            {
+                gz.Write(payload, 0, payload.Length);
+            }
+            payload = ms.ToArray();
         }
-        ms.Position = 0;
-        using var content = new StreamContent(ms);
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-        content.Headers.ContentEncoding.Add("gzip");
+        if (key is null)
+        {
+            return (payload, "application/json", gzip ? "gzip" : null);
+        }
+        byte[] nonce = RandomNumberGenerator.GetBytes(12);
+        byte flags = gzip ? (byte)0x01 : (byte)0x00;
+        byte[] aad = { 0x01, flags };
+        byte[] ciphertext = new byte[payload.Length];
+        byte[] tag = new byte[16];
+        using (var aes = new AesGcm(key, tag.Length))
+        {
+            aes.Encrypt(nonce, payload, ciphertext, tag, aad);
+        }
+        byte[] envelope = new byte[2 + nonce.Length + ciphertext.Length + tag.Length];
+        envelope[0] = 0x01;
+        envelope[1] = flags;
+        nonce.CopyTo(envelope, 2);
+        ciphertext.CopyTo(envelope, 2 + nonce.Length);
+        tag.CopyTo(envelope, 2 + nonce.Length + ciphertext.Length);
+        return (envelope, "application/octet-stream", null);
+    }
+
+    public static async Task PostAsync(HttpClient client, string url, string json,
+                                       byte[]? key, bool gzip)
+    {
+        var (body, contentType, contentEncoding) = BuildBody(json, key, gzip);
+        using var content = new ByteArrayContent(body);
+        content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        if (contentEncoding is not null)
+        {
+            content.Headers.ContentEncoding.Add(contentEncoding);
+        }
         using var response = await client.PostAsync(url, content).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
