@@ -231,7 +231,9 @@ Disk verifiable, winload gained a deterministic disk phase:
   latency histogram present): the write total need not equal 256,
   because the storage stack may split or merge I/Os; and no strict
   read expectation is made, since reads of a just-written file may
-  still be cache-served. Runtime verification pending that run.
+  still be cache-served. **Disk category RUNTIME VERIFIED 2026-11-13**
+  — see the verification log at the bottom of this file and
+  evidence/step3-winops-disk-verified-2026-11-13.md.
 - **Registry workload: SKIPPED, by the user's explicit decision.** A
   matching winload `--registry` mode (test code writing keys under
   HKCU) was proposed and dropped: winops' Registry category is
@@ -420,3 +422,18 @@ pairing covered 2802/2802 ops (avg 15.5us, 90.7% <50us); Disk 0 (cached);
 unmatched completions 16 (0.6%, in-flight at start). Evidence:
 evidence/2026-11-13-step3-winops-verification.md. Optional --registry run
 not yet exercised.
+
+## Step 3 — Disk category VERIFIED — 2026-11-13 (user's Win11, winload pid 18772, N=114)
+winload `--wait --disk` (256 MiB write-through phase) vs winops
+--seconds 60: Disk 1291 ops, LAT_OPS 1291/1291 (every disk event carried
+its embedded latency), avg 251.1µs, max 6.1 ms, kinds Write 1116 / Read
+175 (86% Write). File.Write 1172 = 114 loop + ~1058 phase writes
+(~4.1 per 1 MiB block — storage-stack splitting, disclosed); Flush kind
+exactly 1. Cross-layer check: File avg latency 15.6→139.0µs (the wait)
+while Disk avg 251.1µs (device service time). An earlier same-day
+attempt (pid 11100) never ran the disk phase — File.Write stayed
+exactly N — and was diagnosed from the counts before the re-run.
+Evidence: evidence/step3-winops-disk-verified-2026-11-13.md. winops
+File/Disk/Network/ProcessThread now fully verified; Registry remains
+observe-only functional (16 runtime events observed 2026-11-13), its
+deterministic test skipped at the user's direction.
