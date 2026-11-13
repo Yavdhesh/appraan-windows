@@ -11,6 +11,16 @@ using System.Net.Sockets;
 
 int pid = Environment.ProcessId;
 Console.WriteLine($"winload pid={pid}");
+
+// Optional --wait: print the PID and pause until Enter is pressed, so an
+// observer (winscope) can be started against this PID before any workload
+// happens. This makes the smoke test race-free.
+if (args.Contains("--wait"))
+{
+    Console.WriteLine("waiting — start winscope against this pid, then press Enter to begin the workload...");
+    Console.ReadLine();
+}
+
 Console.WriteLine("generating TCP + file workload for ~15 s... watch this pid with winscope.");
 
 var listener = new TcpListener(IPAddress.Loopback, 0);
