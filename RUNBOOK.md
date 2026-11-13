@@ -614,6 +614,46 @@ often — **`--interval 2`** pairs well with it:
 dotnet run -c Release --project .\src\appraanagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --interval 2
 ```
 
+## Feed transport, security + identity flags
+
+**Default: literal plain JSON over HTTP — no compression, no
+encryption.** Everything below is opt-in. The complete reference
+(flag table, worked examples, file-placement tables, behaviour
+matrix) is Appraan's README, **"Kernel feed transport & security
+configuration"** — in particular its two grouped walkthroughs,
+**"Option A: HTTPS (TLS)"** and **"Option B: Shared-key encryption
+(AES-256-GCM)"**. The agent-side flags, with wording identical to
+that table:
+
+| Flag / config | Argument | Default | Effect | Must pair with |
+|---|---|---|---|---|
+| `--push` | URL | — (or use `--out`) | POST each snapshot to Appraan's ingest endpoint. `http://…` = plain HTTP; `https://…` = TLS | A running Appraan UI on that port |
+| `--gzip` | — | off | Gzip-compress the push body at maximum (smallest-size) compression; sets `Content-Encoding: gzip`. Appraan accepts gzipped bodies with no flag of its own | Nothing — independent opt-in |
+| `--gen-key` | `<path>` | — | Standalone: write a fresh shared key file and exit (no PID/session needed) | Then distribute the file to both sides (Option B) |
+| `--key-file` | `<path>` | off | Seal every push in an AES-256-GCM envelope (Option B) | Appraan `--kernel-key-file` with the **same** key file |
+| `--tls-cert` | `<path>` (.cer, DER or PEM) | system trust | For `https://` pushes: trust **exactly** this server certificate (raw-byte pinning), nothing else | Appraan `--https-keystore` whose certificate this is |
+
+Short version of the two options (full steps in the Appraan README
+sections named above):
+
+- **Option B — shared key.** Create the key once with
+  `dotnet run -c Release --project .\src\appraanagent -- --gen-key $env:USERPROFILE\appraan-feed.key`,
+  copy the **same file** to the Appraan side (it is a symmetric shared
+  secret on both machines), and add `--key-file …` here +
+  `--kernel-key-file …` there. Appraan then accepts *only* envelopes
+  (fail-closed). The `--out` file stays plain JSON regardless.
+- **Option A — HTTPS.** Appraan runs with `--https-keystore`; push to
+  the `https://…` URL and pass the exported `appraan.cer` via
+  `--tls-cert` so the agent trusts exactly that certificate. Only the
+  public `.cer` travels to this machine — the `.p12` keystore and its
+  password never leave the Appraan side. Without `--tls-cert`, https
+  URLs use normal system trust.
+- **`--label k=v` — snapshot labels (repeatable).** Every snapshot
+  carries a `host` field (this machine's name, automatic) plus any
+  labels given here — foresight for the future central-collector mode
+  (pods reporting to one Appraan). Appraan displays host/labels in the
+  Kernel views today.
+
 ## What success looks like
 
 - The banner lists the sink(s): `push -> http://127.0.0.1:7676/api/kernel/ingest`

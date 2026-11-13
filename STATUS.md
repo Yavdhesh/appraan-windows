@@ -34,10 +34,33 @@ the 2-decimal wintcplife convention); `offCpu` (onCpuMs, offCpuMs,
 offCpuPct, episodes, maxEpisodeMs, reasons ≤ 10 with pct, threads
 ≤ 10 with partial flag).
 
+Follow-up features (same day, user decisions in order): latency
+**histogram** added to each ops category (winops' exact bucket labels);
+push body gzip at max compression — then superseded by the final
+transport rule: **default push = literal plain JSON over HTTP**;
+`--gzip` makes compression opt-in. **Encryption in both modes**:
+`--key-file` seals pushes in an AES-256-GCM envelope
+(`[0x01][flags][nonce][ct+tag]`, header as GCM AAD, flags bit0 =
+gzipped-inside; `--gen-key` writes a fresh key file and exits, works
+on any OS), and `--tls-cert` pins the Appraan server certificate for
+`https://` pushes (DER or PEM; system trust when omitted). Snapshots
+gain optional `host` (Environment.MachineName, automatic) and
+`labels` (`--label k=v`) — central-collector foresight. All modes
+verified out-of-process with the production `KernelPush.BuildBody`
+code: default body is byte-identical to the JSON; **both envelope
+variants were decrypted and matched by Appraan (Java) in proof run4
+Phases D/E — cross-stack AES-GCM interop proven by execution.** The
+complete configuration reference is Appraan's README, "Kernel feed
+transport & security configuration" (Option A: HTTPS / Option B:
+Shared-key); RUNBOOK's appraanagent section carries the agent-side
+flag table with identical wording.
+
 Verification on this (Linux) VM — ETW cannot run here, so:
 - Full solution build: 0 warnings, 0 errors (7 projects).
 - CLI paths: no-sink → usage + exit 2; missing PID → usage + exit 2;
-  valid args → platform guard message + exit 1, no file created.
+  valid args → platform guard message + exit 1, no file created;
+  `--gen-key` → key file + exit 0; bad `--key-file` → exit 2 with a
+  clear message (fail fast, before any session starts).
 - The JSON builder was exercised OUT of process (extracted verbatim
   into a throwaway harness fed with the trackers' real stats record
   types, using the verified winops pid-18772 / winoffcpu pid-53152
