@@ -186,17 +186,31 @@ public sealed class KernelSession : IDisposable
             keywords |= KernelTraceEventParser.Keywords.Process;
         if (groups.HasFlag(KernelGroups.Thread))
             keywords |= KernelTraceEventParser.Keywords.Thread | KernelTraceEventParser.Keywords.ContextSwitch;
+        if (groups.HasFlag(KernelGroups.Registry))
+            keywords |= KernelTraceEventParser.Keywords.Registry;
         return keywords;
     }
 
-    private void Emit(TraceEvent data, string provider, EventCategory category) =>
-        EventReceived?.Invoke(new KernelEvent(
-            data.TimeStamp, provider, data.EventName, data.ProcessID, data.ThreadID, category));
+    private void Emit(TraceEvent data, string provider, EventCategory category)
+    {
+        // Check for subscribers BEFORE allocating the record: consumers that
+        // only use the typed parser path (e.g. winops, which enables the
+        // very-high-volume Thread/ContextSwitch group) would otherwise pay
+        // one allocation per kernel event for events nobody observes.
+        if (EventReceived is { } handler)
+            handler(new KernelEvent(
+                data.TimeStamp, provider, data.EventName, data.ProcessID, data.ThreadID, category));
+    }
 
     /// <summary>
     /// Subscribe the typed kernel-parser handlers for the enabled groups.
     /// Typed handlers (rather than a catch-all) keep event naming and
     /// categorisation exact, and each event reaches us exactly once.
+    /// The Registry group intentionally gets NO wiring here: the normalised
+    /// <see cref="EventCategory"/> model has no registry category, so
+    /// registry consumers (step 3's <see cref="OpsTracker"/>) subscribe to
+    /// the typed registry events on <see cref="KernelParser"/> directly.
+    /// Enabling the keyword (see ToKeywords) is all the session must do.
     /// </summary>
     private void WireHandlers(KernelTraceEventParser parser)
     {

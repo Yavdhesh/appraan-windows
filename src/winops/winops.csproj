@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Winops</RootNamespace>
+    <AssemblyName>winops</AssemblyName>
+    <Description>Kernel operations by category, with latency, per process — the parity form of Linux syscount for Windows (ETW FileIO/DiskIO/TCPIP/Registry), via Appraan.Windows.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Appraan.Windows\Appraan.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

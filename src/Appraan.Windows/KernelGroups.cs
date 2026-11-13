@@ -26,6 +26,19 @@ public enum KernelGroups
     /// <summary>Thread start/stop and context switches.</summary>
     Thread = 1 << 4,
 
-    /// <summary>All groups defined for step 1.</summary>
+    /// <summary>
+    /// Registry operations (create/open/query/set/delete keys and values),
+    /// added in step 3. Deliberately NOT part of <see cref="All"/>: registry
+    /// tracing is opt-in (winops exposes it as <c>--registry</c>) because it
+    /// adds a high-volume event stream most investigations do not need.
+    /// Unlike the other groups, registry events have no normalised
+    /// <see cref="KernelEvent"/> wiring in <see cref="KernelSession"/> —
+    /// consumers subscribe to the typed registry events on
+    /// <see cref="KernelSession.KernelParser"/> directly (see
+    /// <see cref="OpsTracker"/>).
+    /// </summary>
+    Registry = 1 << 5,
+
+    /// <summary>All groups defined for step 1 (registry is opt-in, see <see cref="Registry"/>).</summary>
     All = Tcp | File | Disk | Process | Thread,
 }

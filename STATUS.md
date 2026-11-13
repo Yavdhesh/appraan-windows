@@ -1,5 +1,113 @@
 # Appraan.Windows — STATUS
 
+## Step 3: winops (kernel ops by category + latency) — BUILT, compile-verified, runtime UNVERIFIED
+`winops <PID> [--seconds N] [--registry]` prints, every 5 s and at exit, a
+per-category table (COUNT, LAT_OPS, AVG_US, MAX_US) with latency
+histograms for File/Disk, a per-kind drill-down at exit, and pairing
+diagnostics. This is the user-facing parity promise: what the process is
+asking the kernel to do, how often, how long it takes.
+
+### TraceEvent 3.1.8 API — verified by reflection + parser source, NOT from memory
+- **Disk latency is embedded in the completion payload.**
+  `DiskIOTraceData` (DiskIORead/DiskIOWrite) and
+  `DiskIOFlushBuffersTraceData` both declare `ElapsedTimeMSec` (double),
+  computed from a response-time QPC field the kernel embeds in the event.
+  No pairing needed. Disk ops are counted ONCE, at completion; the
+  DiskIOReadInit/WriteInit/FlushInit start halves are deliberately not
+  counted (winscope counts them as raw events — a documented difference).
+- **File latency needs IrpPtr pairing.** `FileIOReadWriteTraceData`
+  (Read/Write), `FileIOCreateTraceData`, `FileIOInfoTraceData`
+  (SetInfo/Delete/Rename/QueryInfo/FSControl) and
+  `FileIODirEnumTraceData` all carry `IrpPtr` (UInt64) but NO elapsed
+  time. The completion event `FileIOOperationEnd` →
+  `FileIOOpEndTraceData` carries the same `IrpPtr` (+ NtStatus). Design:
+  every IrpPtr-carrying FileIO start (Create, Read, Write, Cleanup, Close,
+  Flush, SetInfo, Delete, Rename, QueryInfo, FSControl, DirEnum,
+  DirNotify) enters a pending table keyed by IrpPtr; OperationEnd pairs
+  with it (latency = Δ of ETW relative timestamps), attributed to the
+  START event's pid (an IRP can complete on another thread/process).
+  FileIOName/FileRundown and FileCreate/FileDelete object notifications
+  are not operations and are not counted; MapFile/UnmapFile count without
+  latency (no IrpPtr). Pending table: 10 s staleness horizon, 100k cap,
+  evictions / unmatched completions / duplicate starts all surface in
+  `OpsDiagnostics` (printed by winops every table).
+- **Registry is a first-class kernel keyword.** Reflection over
+  `KernelTraceEventParser.Keywords` shows `Registry = 0x00020000`, and the
+  kernel parser has typed Registry* events (RegistryCreate/Open/Query/
+  QueryValue/SetValue/EnumerateKey/... → `RegistryTraceData`). So
+  registry rides the SAME NT Kernel Logger session via
+  `EnableKernelProvider` — no separate EnableProvider/GUID needed (the
+  TDH name→GUID lookup is Windows-only and could not be exercised here;
+  it is also unnecessary). Still opt-in (`KernelGroups.Registry`, NOT in
+  `KernelGroups.All`; winops `--registry`): if session start with the
+  keyword fails for any non-elevation reason, winops warns and retries
+  without it — registry can never break the core tool. Counts only;
+  KCB/rundown events skipped as bookkeeping.
+- **ProcessThread**: ProcessStart/Stop, ThreadStart/Stop (header PID) and
+  ThreadCSwitch → `CSwitchTraceData`, which carries explicit
+  `NewProcessID`/`OldProcessID`; a switch is attributed to the process
+  switched IN (NewProcessID) — "times this process got a CPU".
+- Network counts reuse the TcpIp/UdpIp event set from steps 1–2 (incl.
+  Retransmit/Fail; v6 mirrors fold into the same kinds).
+
+### KernelSession changes (minimal, non-breaking)
+- `KernelGroups.Registry` (1<<5) added; `All` unchanged. `ToKeywords`
+  maps it to `Keywords.Registry`. No normalised EventReceived wiring for
+  registry (EventCategory has no registry bucket — winscope untouched);
+  `OpsTracker` subscribes to the typed events on `KernelParser`.
+- `Emit` now checks for subscribers before allocating the `KernelEvent`
+  record — pure perf fix: winops enables the >10K events/s
+  ContextSwitch group but consumes only the typed path, and previously
+  every kernel event allocated a record nobody observed. winscope (which
+  subscribes) is behaviourally unaffected; its Linux platform guard was
+  re-checked (exit 1), as was wintcplife's usage path (exit 2).
+
+### Build (real output, this VM, .NET SDK 8.0.428)
+```
+  Appraan.Windows -> .../src/Appraan.Windows/bin/Release/net8.0/Appraan.Windows.dll
+  winscope -> .../src/winscope/bin/Release/net8.0/winscope.dll
+  winload -> .../src/winload/bin/Release/net8.0/winload.dll
+  wintcplife -> .../src/wintcplife/bin/Release/net8.0/wintcplife.dll
+  winops -> .../src/winops/bin/Release/net8.0/winops.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+```
+Linux-side checks: winops with no args / non-numeric pid / unknown flag
+→ usage + exit 2; valid pid off-Windows → platform-guard message + exit 1
+(also with `--registry` — the fallback does not misfire on the platform
+guard). ETW runtime behaviour remains UNVERIFIED until the run below.
+
+### User test (RUNBOOK.md Step 3) — expected signature vs winload
+Window A: `winload --wait` (note pid + its final iteration count N,
+≈131 in the Step 2 verified run). Window B (admin):
+`winops <pid> --seconds 25`, then Enter in A. Optionally repeat with
+`--registry` afterwards.
+- **STRICT** (must hold or something is wrong):
+  - `File.Read` kind ≥ N and `File.Write` kind ≥ N (one read + one write
+    of the 4 KB temp file per iteration are guaranteed kernel operations;
+    both init events are enabled via FileIOInit).
+  - File category COUNT in the hundreds (≈6–10 file ops per iteration:
+    create+write+close and create+read+close, plus runtime file activity).
+  - Network category COUNT ≥ 262 (each of the 2N connections contributes
+    at least a connect/accept and a disconnect; sends/recvs push the
+    expected total to ~500–1100).
+- **INDICATIVE** (expected shape, not pass/fail):
+  - File latency: LAT_OPS large (most starts pair with an OperationEnd)
+    and histogram mass in the sub-ms buckets — winload's file is cached,
+    so latencies should be mostly < 1 ms. How completely OperationEnd
+    covers fast-IO (cached) completions is the main open question of this
+    run; the diagnostics line (unmatched/evicted) quantifies it.
+  - Disk COUNT ≈ 0 (cached IO, same finding as winscope's Disk=0) — a
+    small nonzero number under memory pressure would not be a failure.
+  - ProcessThread COUNT in the hundreds+, dominated by
+    `ProcessThread.ContextSwitch` (winload's threadpool + 100 ms delay
+    loop schedules constantly).
+  - With `--registry`: Registry row shows real counts (the .NET runtime
+    reads registry during winload's run) and the session survives; the
+    exact number is not predictable.
+
 ## Step 2: wintcplife (tcplife equivalent) — FUNCTIONAL on Win11, byte-accounting fix applied, RE-VERIFICATION pending
 Functional on Win11 (2026-11-13 run: lines/endpoints/durations correct,
 222+ closed tracked), byte-accounting fix applied, RE-VERIFICATION pending.
@@ -98,7 +206,11 @@ TX≈RX≈0.03 KB, NO zero-byte phantom lines, durations ~0.3–0.8 ms, and an
       no phantom lines).
 
 ## Next (per DESIGN.md build order)
-3. Kernel ops by category + latency (FileIO/DiskIO/Registry/TCPIP pairs).
+3. Kernel ops by category + latency — BUILT, see the Step 3 section at the
+   top of this file (runtime verification on the user's machine pending).
+   Note DESIGN.md item 4 (IO latency histograms per process) is already
+   delivered inside winops for the File and Disk categories.
+5. Off-CPU (CSwitch + wait reasons; stacks need symbol handling).
 
 ## Step 1: solution skeleton + ETW session plumbing — CODE COMPLETE, COMPILE-VERIFIED
 Finished 2026-11-13 (assistant's Linux VM). Runtime ETW behaviour is still

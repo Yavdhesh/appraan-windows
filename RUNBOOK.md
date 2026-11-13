@@ -239,3 +239,127 @@ every process's connections on the machine, like the real `tcplife`.
 Paste the wintcplife output (a few connection lines + the summary) back to
 Muse Ram — success or failure, the exact numbers are what Step 3 gets
 built on.
+
+---
+
+# Step 3 — winops (kernel operations by category, with latency)
+
+Goal of this run: prove the "syscount for Windows" view end-to-end.
+`winops` watches one process and reports what it asks the kernel to do —
+file, disk, network, process/thread (and optionally registry) operations:
+how many, and for file/disk how long they take (average, max, and a
+latency histogram). Same workload as before: `winload`'s loop of TCP
+echo iterations + temp-file write/read gives us known numbers to check.
+
+Prerequisite: Steps 1–2 passed. Update and rebuild first:
+
+```powershell
+cd appraan-windows          # wherever you cloned it
+git pull
+dotnet build -c Release
+```
+
+Expected: `Build succeeded`, `0 Error(s)`, now for **five** projects
+(the new one is `winops`).
+
+## Run the test (ADMIN PowerShell, two windows)
+
+**Window A — start the workload, paused** (same as Steps 1–2):
+
+```powershell
+dotnet run -c Release --project src\winload -- --wait
+```
+
+Note the pid it prints, and — at the end of the run — winload's final
+line: `winload done: N iterations ...`. **N matters**: the strict checks
+below are expressed in terms of it (it was 131 in the Step 2 run).
+
+**Window B — watch that pid's kernel operations:**
+
+```powershell
+dotnet run -c Release --project src\winops -- 12348 --seconds 25
+```
+
+> Pass the pid as a BARE number right after `--` — `12348`, not
+> `--pid 12348` (winops takes the pid positionally, like winscope).
+> Wrong arguments print `usage: winops <PID> [--seconds N] [--registry]`.
+
+Once winops prints its first line, go back to Window A and **press
+Enter**. winops prints the table every 5 s (cumulative) and once more at
+exit with a per-kind drill-down and a diagnostics line.
+
+## What success looks like
+
+Table shape (your numbers will differ — the relationships are the test):
+
+```
+=== winops summary: pid 12348 over ~25s ===
+CATEGORY        COUNT  LAT_OPS    AVG_US    MAX_US
+File             1187      842      38.4     910.2
+  hist: <10us:512  <50us:231  <100us:61  <500us:33  <1ms:5
+  kinds: Create:262  Read:131  Write:131  Close:262  Cleanup:262  SetInfo:131 ...
+Disk                0        -         -         -
+Network          1048        -         -         -
+  kinds: TcpConnect:131  TcpAccept:131  TcpSend:262  TcpRecv:262  TcpDisconnect:262
+ProcessThread    2210        -         -         -
+  kinds: ContextSwitch:2140  ThreadStart:35  ThreadStop:35
+Registry            -        -         -         -  (not enabled — pass --registry)
+diagnostics: pending file ops=2  unmatched completions=0  duplicate starts=0  evicted pending=0
+total operations: 4445
+```
+
+**Strict checks** (these must hold — if not, paste the output back):
+
+- ✅ In the File `kinds:` line, **Read ≥ N and Write ≥ N**, where N is
+  winload's iteration count (one 4 KB write + one 4 KB read per
+  iteration, every iteration, no exceptions).
+- ✅ **File COUNT in the hundreds** (roughly 6–10 file operations per
+  iteration: create/write/close + create/read/close, plus the runtime's
+  own file activity in that process).
+- ✅ **Network COUNT ≥ 262** (each winload iteration makes 2 connections
+  — client + accepted server — and each contributes at least a
+  connect/accept plus a disconnect; sends and receives push the expected
+  total to roughly 500–1100).
+
+**Expected shape** (indicative — interesting if different, not a failure):
+
+- File **LAT_OPS** should be a large fraction of File COUNT, and the
+  histogram should sit in the sub-millisecond buckets — winload's temp
+  file is served from the Windows file cache, so its file operations are
+  fast. (How completely completion events cover cached I/O is the main
+  thing this run measures; the `diagnostics:` line quantifies any gap —
+  pending operations should drain back towards 0 once winload finishes.)
+- **Disk COUNT ≈ 0** — same cached-I/O finding as winscope's `Disk=0`:
+  nothing reaches a physical device. A small nonzero number is fine.
+- **ProcessThread COUNT in the hundreds or more**, dominated by
+  `ContextSwitch` (winload's thread pool + 100 ms sleep loop schedules
+  constantly), with some ThreadStart/ThreadStop.
+
+## Optional second run — registry counts
+
+Same two windows, but Window B gets one more flag:
+
+```powershell
+dotnet run -c Release --project src\winops -- 12348 --seconds 25 --registry
+```
+
+Success: the **Registry** row now shows real counts instead of
+"(not enabled...)", and everything else behaves exactly as in the main
+run. If enabling registry fails on your machine, winops prints a warning
+(`could not enable registry tracing ... continuing without Registry
+counts`) and the rest of the run still works — that fallback is by
+design, but paste the warning back verbatim if you see it.
+
+### If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| "Kernel ETW tracing requires an elevated process" | Not an admin PowerShell — reopen elevated, retry. |
+| `usage: winops <PID> [--seconds N] [--registry]` | Bad arguments — most likely `--pid 12348` (winops wants the bare pid) or a missing `--` after `dotnet run ... --`. |
+| File/Network counts are 0 | winload's Enter wasn't pressed while winops was running, or the pid is wrong. Redo with a fresh `winload -- --wait` and its new pid. |
+| `File.Read` or `File.Write` below winload's iteration count | Paste the full output back — that contradicts guaranteed workload operations and the start-event capture needs a look. |
+| LAT_OPS is 0 or tiny while File COUNT is large | Paste the full output back, including the `diagnostics:` line — completion pairing is not flowing as designed and the counters will show where. |
+| Registry warning printed, rest of run fine | Working as designed (fallback). Paste the warning line back so the cause is on record. |
+
+Paste the final winops summary back to Muse Ram — success or failure,
+the exact numbers are what the next step gets built on.
