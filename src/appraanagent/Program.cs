@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.IO.Compression;
+using System.Net.Http.Headers;
 using System.Text;
 using Appraan.Windows;
 
@@ -451,7 +453,11 @@ internal static class KernelJson
 }
 
 /// <summary>
-/// POSTs one snapshot document to Appraan's ingest endpoint. Kept as a
+/// POSTs one snapshot document to Appraan's ingest endpoint. The body is
+/// the same JSON the file sink writes, gzip-compressed at the smallest
+/// size (feed format decision: JSON stays; push travels compressed —
+/// Content-Type: application/json, Content-Encoding: gzip). The file
+/// sink stays plain text: it is the human-readable recorder. Kept as a
 /// separate unit (like <see cref="KernelJson"/>) so the failure semantics
 /// live in exactly one place: any failure — connection refused, timeout,
 /// non-2xx — surfaces as an exception for the caller's streak handling;
@@ -461,7 +467,16 @@ internal static class KernelPush
 {
     public static async Task PostAsync(HttpClient client, string url, string json)
     {
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        byte[] plain = Encoding.UTF8.GetBytes(json);
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
+        {
+            gz.Write(plain, 0, plain.Length);
+        }
+        ms.Position = 0;
+        using var content = new StreamContent(ms);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        content.Headers.ContentEncoding.Add("gzip");
         using var response = await client.PostAsync(url, content).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
