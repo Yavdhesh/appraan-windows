@@ -561,3 +561,75 @@ Enter**. winload runs its normal loop, then prints
 
 Paste the final winops summary back to Muse Ram — the Disk row and its
 `kinds:` line are the verdict.
+
+# Integration — winagent (the Appraan sidecar)
+
+`winagent` is how the four tools above plug into **Appraan** (the Java
+tool). It runs all three trackers — ops (`winops`), TCP life
+(`wintcplife`), off-CPU (`winoffcpu`) — inside **one** kernel session
+for one PID. That is not a style choice: Windows allows effectively one
+NT Kernel Logger session, and each standalone tool stops any stale
+session when it starts, so the three tools cannot run side by side as
+separate processes. One process, one session, three trackers.
+
+Every interval it publishes **one JSON snapshot document** (the same
+document on both sinks):
+
+- **`--push <url>` — primary.** POSTs the snapshot to Appraan's UI
+  server ingest endpoint. A failed push never stops the agent: you get
+  one warning line when a failure streak starts, one line when it
+  recovers, and because snapshots are cumulative the next successful
+  push self-heals.
+- **`--out <path>` — fallback / recorder.** Atomically rewrites a local
+  file (temp file + rename, never a torn write) that Appraan polls with
+  its `--kernel-file` option, and that doubles as the run's evidence.
+  Use both sinks together when you want the live UI *and* the recording.
+
+At least one of `--out` / `--push` is required. winagent is the
+elevated half of Appraan on Windows — run it from an **admin
+PowerShell**; Appraan itself never needs elevation (its Attach API
+wants the target's own user).
+
+## Run it (ADMIN PowerShell)
+
+Primary flow — push to a running Appraan UI (Appraan is observing the
+same PID in its own window; see the Appraan repo for the full
+three-window test):
+
+```powershell
+dotnet run -c Release --project .\src\winagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --seconds 60
+```
+
+Fallback flow — record to a file instead (Appraan side then runs with
+`--kernel-file %TEMP%\appraan-kernel.json`):
+
+```powershell
+dotnet run -c Release --project .\src\winagent -- <pid> --out %TEMP%\appraan-kernel.json --seconds 60
+```
+
+For a realtime feel in Appraan's UI mode (`--seconds 0`), publish more
+often — **`--interval 2`** pairs well with it:
+
+```powershell
+dotnet run -c Release --project .\src\winagent -- <pid> --push http://127.0.0.1:7676/api/kernel/ingest --interval 2
+```
+
+## What success looks like
+
+- The banner lists the sink(s): `push -> http://127.0.0.1:7676/api/kernel/ingest`
+  and/or `file -> ...\appraan-kernel.json`.
+- A `[t+ Ns] snapshot published (off-CPU X%)` line every interval.
+- With `--out`: the file exists from t=0 and its `tEpochMs` /
+  `windowSeconds` advance on every interval.
+- With `--push`: no `push ... failed` warning lines (or a `recovered`
+  line after Appraan's UI starts). In Appraan's dashboard, the Kernel
+  panel fills in within one interval.
+
+### If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| `usage: winagent <PID> ...` (exit 2) | A PID and at least one of `--out` / `--push` are required. |
+| `winagent: ... requires an elevated process` | Re-run from an admin PowerShell — ETW kernel sessions need elevation. |
+| `push ... failed (HttpRequestException ...)` warnings | Appraan's UI isn't up yet, or the port differs (`--port` on the Appraan side). The agent keeps running; pushes self-heal when the UI appears. |
+| Kernel panel in Appraan says "stale" | Snapshots stopped arriving — check the agent window is still running and the interval/seconds haven't expired. |

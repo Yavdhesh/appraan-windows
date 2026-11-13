@@ -1,5 +1,53 @@
 # Appraan.Windows — STATUS
 
+## Integration: winagent (the Appraan sidecar) — BUILT, compile-verified 2026-11-13; runtime verification pending
+
+The standalone tools become Appraan's Windows kernel collector. Design
+constraints that shaped it (all confirmed against the existing code):
+
+- Windows allows effectively ONE NT Kernel Logger session
+  ("AppraanSession") and every tool stops any stale session on start —
+  so winops + wintcplife + winoffcpu cannot run concurrently as
+  separate processes. `src/winagent` is a single process hosting
+  OpsTracker + TcpConnectionTracker + OffCpuTracker in one
+  KernelSession (groups: KernelGroups.All, plus opt-in Registry with
+  winops' fallback-if-it-fails behaviour).
+- Elevation split: winagent runs elevated (ETW); Appraan (Attach API,
+  same-user) never elevates. The two meet over the snapshot document.
+- Sinks (user design amendment): `--push <url>` POSTs the snapshot to
+  Appraan's UI ingest endpoint (primary; failures never stop the agent —
+  one warning per failure streak, snapshots are cumulative so the next
+  success self-heals); `--out <path>` atomically rewrites a local JSON
+  file (fallback / recorder / evidence). At least one sink required;
+  both may be used together.
+
+Snapshot JSON contract (one document per interval; hand-built,
+invariant culture, zero dependencies): top-level `pid`, `tEpochMs`,
+`windowSeconds`; `ops.categories[]` (name, count, latOps, avgUs/maxUs
+or null, kinds) + `ops.diagnostics`; `tcp` (closedTotal, txBytes,
+rxBytes, stillOpen, unmatchedDisconnects, recent ≤ 20 with txKb/rxKb at
+the 2-decimal wintcplife convention); `offCpu` (onCpuMs, offCpuMs,
+offCpuPct, episodes, maxEpisodeMs, reasons ≤ 10 with pct, threads
+≤ 10 with partial flag).
+
+Verification on this (Linux) VM — ETW cannot run here, so:
+- Full solution build: 0 warnings, 0 errors (7 projects).
+- CLI paths: no-sink → usage + exit 2; missing PID → usage + exit 2;
+  valid args → platform guard message + exit 1, no file created.
+- The JSON builder was exercised OUT of process (extracted verbatim
+  into a throwaway harness fed with the trackers' real stats record
+  types, using the verified winops pid-18772 / winoffcpu pid-53152
+  figures): output parses as JSON and every contract field was asserted
+  (null latencies, exact byte totals, 0.03 KB convention, reason pct).
+- The push transport could NOT be live-tested from this VM: the
+  sandbox intercepts direct TCP from language runtimes (.NET/Java) —
+  the same block recorded for Java HttpClient in Appraan's M2 proof;
+  curl is unaffected. KernelPush is a single POST +
+  EnsureSuccessStatusCode, compile-verified; the receiving side
+  (Appraan's ingest endpoint) IS live-verified in Appraan's proof run4
+  via curl, and the full winagent→Appraan loop is the user's two-window
+  Windows test (RUNBOOK "Integration — winagent").
+
 ## Step 4: winoffcpu (off-CPU analysis) — RUNTIME VERIFIED 2026-11-13
 
 **VERIFIED 2026-11-13** (user's Win11, winload pid 4828, 25 s watch):
