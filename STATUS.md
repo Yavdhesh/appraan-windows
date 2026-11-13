@@ -1,6 +1,21 @@
 # Appraan.Windows — STATUS
 
-## Step 4: winoffcpu (off-CPU analysis) — BUILT, compile-verified, runtime UNVERIFIED
+## Step 4: winoffcpu (off-CPU analysis) — RUNTIME VERIFIED 2026-11-13
+
+**VERIFIED 2026-11-13** (user's Win11, winload pid 4828, 25 s watch):
+off-CPU **99.6%** (strict > 80% ✅), max episode 15083.2 ms with the
+100 ms Task.Delay signature in the per-thread MAX_MS cluster
+(~103–123 ms), 5804 episodes, zero missed switch edges; arithmetic
+reconciles (~15 threads × ~15 s ≈ 188.0 s summed off-CPU). Defect
+found by the run: wait reasons the TraceEvent enum does not name
+printed as raw numbers (15, 37, 17, 27, 28) — fixed in `e58be74` by
+mapping the full NT KWAIT_REASON table (15 = `WrQueue`, the dominant
+reason at 59.8%, then `UserRequest` 39.5%). The indicative
+"Executive will dominate" guess in the user-test section below was
+WRONG (Executive: 0.2%) — the wrong guess and the full audit are
+recorded in evidence/step4-winoffcpu-verified-2026-11-13.md. The same
+fix commit adds units lines under the winops/winoffcpu banners
+(microseconds / milliseconds spelled out), at the user's request.
 `winoffcpu <PID> [--seconds N]` prints, every 5 s and at exit, the
 process's on-CPU / off-CPU totals and off-CPU %, a wait-reason table
 (reason, episodes, total ms, %), the top threads by off-CPU time
@@ -346,9 +361,9 @@ TX≈RX≈0.03 KB, NO zero-byte phantom lines, durations ~0.3–0.8 ms, and an
    top of this file (runtime verification on the user's machine pending).
    Note DESIGN.md item 4 (IO latency histograms per process) is already
    delivered inside winops for the File and Disk categories.
-5. Off-CPU (CSwitch + wait reasons) — BUILT, see the Step 4 section at
-   the top of this file (runtime verification on the user's machine
-   pending). Stack capture remains a later step.
+5. Off-CPU (CSwitch + wait reasons) — RUNTIME VERIFIED 2026-11-13,
+   see the Step 4 section at the top of this file. Stack capture
+   remains a later step.
 
 ## Step 1: solution skeleton + ETW session plumbing — CODE COMPLETE, COMPILE-VERIFIED
 Finished 2026-11-13 (assistant's Linux VM). Runtime ETW behaviour is still
@@ -437,3 +452,17 @@ Evidence: evidence/step3-winops-disk-verified-2026-11-13.md. winops
 File/Disk/Network/ProcessThread now fully verified; Registry remains
 observe-only functional (16 runtime events observed 2026-11-13), its
 deterministic test skipped at the user's direction.
+
+## Step 4 VERIFIED — 2026-11-13 (user's Win11, winload pid 4828)
+winoffcpu --seconds 25 vs `winload --wait`: off-CPU 99.6% (strict
+> 80%), max episode 15083.2 ms (main thread's run-length completion
+wait; the 100 ms Task.Delay signature is the per-thread MAX_MS cluster
+at ~103–123 ms), on-CPU total only 758.4 ms, 5804 episodes, 15 threads
+observed (4 partial), diagnostics clean (0 missed switch edges either
+way). Wait reasons: raw `15` = WrQueue 59.8%, UserRequest 39.5%,
+ExecutionDelay 0.5%, Executive only 0.2% (the pre-test prediction of
+Executive dominance was wrong — recorded in the evidence). Defect:
+unnamed wait reasons printed as bare numbers; fixed in `e58be74`
+(full NT KWAIT_REASON mapping + `WaitReason(<n>)` fallback, plus
+units lines in winops/winoffcpu banners). Evidence:
+evidence/step4-winoffcpu-verified-2026-11-13.md.

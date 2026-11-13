@@ -26,7 +26,7 @@ operations by category, with latency*).
 | `winscope` | — (foundation) | Live per-category kernel event counts for one PID (TCP / File / Disk / other) | ✅ verified on Windows 11 |
 | `wintcplife` | `tcplife` | One line per closed TCP connection: endpoints, bytes sent/received, lifetime, retransmits | ✅ verified — byte totals arithmetically exact vs a known workload |
 | `winops` | `syscount` + latency | Kernel operations by category (File, Disk, Network, Process/Thread, optional Registry) with average/max latency and latency histograms for File and Disk | ✅ verified — strict workload checks exact (File.Write = N), latency pairing covers 100% of file ops; Disk verified vs a 256 MiB write-through workload (1291 ops, 100% latency coverage) |
-| `winoffcpu` | `offcputime` | Off-CPU analysis per process from ETW context switches: on/off-CPU totals and %, per-thread off-CPU episodes, and a wait-reason breakdown (why threads were not running) — without stack capture | built, verification in progress |
+| `winoffcpu` | `offcputime` | Off-CPU analysis per process from ETW context switches: on/off-CPU totals and %, per-thread off-CPU episodes, and a wait-reason breakdown (why threads were not running) — without stack capture | runtime verified 2026-11-13 (off-CPU 99.6% vs winload) |
 | `winload` | — (test workload) | Deterministic TCP + file workload used to verify the tools against known numbers | ✅ |
 
 Every "verified" claim is backed by a run in [`evidence/`](evidence/) —
@@ -217,22 +217,39 @@ Summary and progress terms:
 
 ### `winoffcpu` — where a process's threads spend time *not* running
 
-> *Illustrative example.* `winoffcpu`'s runtime verification is still in
-> progress, so the numbers below are made up to show the shape of the
-> output; the labels and units are exactly what the tool prints.
+Sample (real output, from the verified run in
+[`evidence/step4-winoffcpu-verified-2026-11-13.md`](evidence/step4-winoffcpu-verified-2026-11-13.md) —
+`winload`, a deliberately wait-heavy workload: ~15 s of short bursts of
+work separated by 100 ms delays):
 
 ```
-on-CPU      812.4 ms   off-CPU    24103.7 ms   off-CPU  96.7%   episodes 214   max episode 100.3 ms
+=== winoffcpu summary: pid 4828 over ~25s ===
+on-CPU      758.4 ms   off-CPU   188004.3 ms   off-CPU  99.6%   episodes 5804   max episode 15083.2 ms
 wait reasons:
   REASON           EPISODES   TOTAL_MS      %
-  Executive             198    23180.2   96.2
-  UserRequest            12      812.5    3.4
-  Preempted               4      111.0    0.5
+  15                   2551    112420.5   59.8
+  UserRequest           379     74310.0   39.5
+  ExecutionDelay          10       880.7    0.5
+  Executive              319       367.7    0.2
+  Preempted              2161        16.2    0.0
+  Standby                 295         7.7    0.0
+  Unknown                  30         0.7    0.0
 top threads by off-CPU:
-       TID EPISODES  OFFCPU_MS   MAX_MS   ONCPU_MS  OFFCPU_%
-     12345      105    12040.6    100.2      402.1     96.8
-diagnostics: threads observed=9  partial=7  episodes closed=213 (by thread exit=1)  switch-ins w/o episode=0  switch-outs w/o on-CPU=0  open off-CPU=6  open on-CPU=1
+       TID EPISODES  OFFCPU_MS   MAX_MS   ONCPU_MS OFFCPU_%
+     42220       12    15083.2   2016.3        1.2    100.0  (partial)
+     45140        2    15083.2  15083.2        0.1    100.0
+     19144      237    15082.4    523.8        4.9    100.0
+      5040       14    15082.1  15077.7       22.4     99.9  (partial)
+      6588      317    15078.7    448.3        4.5    100.0
+     41520     1138    14926.6    225.3      154.2     99.0
+diagnostics: threads observed=15  partial=4  episodes closed=5804 (by thread exit=0)  switch-ins w/o episode=0  switch-outs w/o on-CPU=0  open off-CPU=0  open on-CPU=0
 ```
+
+One honesty note on this sample: in that run the dominant reason
+printed as the bare number `15`. Current builds name it — `15` is
+**WrQueue** (see the glossary below) — after the run exposed that the
+classic wait-reason enum leaves the kernel's `Wr*` family unnamed;
+the fix maps the full NT KWAIT_REASON table.
 
 **Process totals line**
 
@@ -242,7 +259,7 @@ diagnostics: threads observed=9  partial=7  episodes closed=213 (by thread exit=
 | `off-CPU` | Total time the threads had run before, then spent *not* running — blocked or waiting | ms |
 | `off-CPU %` | `off-CPU ÷ (on-CPU + off-CPU)` — the share of observed thread time spent not running | % |
 | `episodes` | How many separate off-CPU periods (one per switch-out → switch-in pair) | count |
-| `max episode` | The single longest off-CPU period — e.g. 100.3 ms looks like one ~100 ms sleep | ms |
+| `max episode` | The single longest off-CPU period. In the sample it is the main thread waiting for the whole workload run to finish (15083.2 ms); recurring waits show up instead as the per-thread `MAX_MS` values — here a ~103–123 ms cluster, the workload's 100 ms delay | ms |
 
 Note the `%` denominator is *summed thread time*, not wall-clock time: a
 process with many mostly-idle threads legitimately sits near 100%. A
@@ -256,11 +273,12 @@ process's total off-CPU ms).
 
 | Reason | Meaning |
 |---|---|
-| `Executive` | Blocked on a kernel synchronisation object or timer — the general "asleep, waiting to be woken" bucket; a thread doing a timed sleep lands here |
-| `UserRequest` | Blocked servicing a user request — e.g. waiting for work handed to it by another thread or process |
+| `Executive` | Blocked on a kernel synchronisation object or timer — the general "asleep, waiting to be woken" bucket |
+| `UserRequest` | Blocked servicing a user request — e.g. waiting for work handed to it by another thread or process; in the sample this is mostly the main thread's wait for the workload to complete |
+| `WrQueue` | Parked waiting for work on a kernel queue — where idle thread-pool and completion-port threads sit between tasks. The dominant reason in the sample (59.8%): an async program's threads spend most of their lives here |
 | `EventPairHigh` / `EventPairLow` | Blocked on an event-pair object (a synchronisation primitive some subsystem/RPC paths use) |
 | `Preempted` | **Not a block:** the thread was still runnable but was switched out and had to wait for a CPU to become free. This is scheduling delay — the fix is less CPU contention, not faster IO |
-| *(others)* | The kernel's remaining reason names (`FreePage`, `PageIn`, `LpcReceive`, …) appear verbatim when they occur |
+| *(others)* | The kernel's remaining reasons appear when they occur: the classic names (`FreePage`, `PageIn`, `LpcReceive`, …) verbatim, and the `Wr*` family (`WrLpcReply`, `WrPushLock`, …) mapped from the NT KWAIT_REASON table; anything beyond the table prints as `WaitReason(<n>)` rather than a guessed name |
 
 **Top-threads table** — the same accounting per thread, worst first:
 `TID` (OS thread id), `EPISODES`, `OFFCPU_MS` (total off-CPU, ms),
