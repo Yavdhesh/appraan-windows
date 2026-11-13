@@ -56,6 +56,18 @@ cd appraan-windows
 (Public repo — no login needed to clone. If `git` is not installed:
 `winget install Git.Git`, reopen PowerShell, retry.)
 
+If you already cloned earlier, update instead of re-cloning:
+
+```powershell
+git pull
+```
+
+This picks up the `winload --wait` fix (commit `e0c522f`) that makes the
+smoke test race-free. Note: an admin PowerShell opens in
+`C:\Windows\system32`, so relative paths like `.\src\...` only work after
+you `cd` into the repo folder — every command below assumes you are in
+`appraan-windows` first.
+
 ## Step 2 — build
 
 ```powershell
@@ -71,29 +83,35 @@ package on first build, so the first run needs internet and takes a bit longer.
 Open a **second** admin PowerShell window so winload and winscope run side
 by side.
 
-**Window A — start the workload:**
+**Window A — start the workload, paused:**
 
 ```powershell
-dotnet run -c Release --project src\winload
+dotnet run -c Release --project src\winload -- --wait
 ```
 
 It prints something like:
 
 ```
 winload pid=12348
-generating TCP + file workload for ~15 s... watch this pid with winscope.
-listening on 127.0.0.1:51234
+waiting — start winscope against this pid, then press Enter to begin the workload...
 ```
 
-Note the pid (yours will differ). It only runs ~15 s, so be ready with
-Window B — or simply re-run it in Window A when it finishes; you can repeat
-the test as often as you like.
+Note the pid (yours will differ) and **leave this window waiting**. The
+`--wait` flag exists because the workload only runs ~15 s: without it,
+you have to win a race against winload finishing.
 
-**Window B — watch that PID (use YOUR pid):**
+**Window B — watch that PID (use YOUR pid, as a bare number):**
 
 ```powershell
-dotnet run -c Release --project src\winscope -- 12348 --seconds 12
+dotnet run -c Release --project src\winscope -- 12348 --seconds 25
 ```
+
+> Pass just the number — `12348`, not `pid=12348`. winscope parses its
+> first argument as an integer PID and prints
+> `usage: winscope <PID> [--seconds N]` if it cannot.
+
+Once winscope is running in Window B, go back to Window A and **press
+Enter**. The workload starts while winscope is already listening.
 
 Expected output shape (counts will differ — what matters is the shape and
 that Tcp and File are nonzero for winload's pid):
@@ -122,7 +140,9 @@ Tcp=268  File=762  Disk=44  Other=17  Total=1091
 | Symptom | Fix |
 |---|---|
 | "Kernel ETW tracing requires an elevated process" | You're not in an admin PowerShell. Right-click → Run as administrator, retry. |
-| Tcp=0 and File=0 for the pid | winload had already finished before winscope started, or the pid is wrong. Re-run winload and immediately run winscope with the fresh pid. |
+| `usage: winscope <PID> [--seconds N]` | The PID was passed with a prefix (e.g. `pid=12348`). Pass the bare number: `-- 12348`. |
+| `Tcp=0 and File=0` for the pid | winload had already finished before winscope started, or the pid is wrong. Use `winload -- --wait`, start winscope against the fresh pid, then press Enter in winload's window. |
+| `The term '.\src\winload\...' is not recognized` | You're not in the repo folder (admin PowerShell opens in `C:\Windows\system32`). `cd` into `appraan-windows` first, or use `dotnet run --project <full path to the .csproj>`. |
 | `dotnet` not recognised | SDK missing → Step 0a, then reopen PowerShell. |
 | Build errors mentioning TraceEvent / NuGet | Check internet access (first restore downloads packages), then re-run `dotnet build -c Release`. |
 

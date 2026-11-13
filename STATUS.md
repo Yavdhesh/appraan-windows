@@ -25,8 +25,16 @@ the RUNBOOK.md smoke test passes on the user's Windows 11 machine
 - [x] Linux-side smoke checks: winload's TCP+file loop runs (50+ iterations);
       winscope off-Windows exits 1 with the platform-guard message, as designed
 - [x] RUNBOOK.md — env checks, winget SDK install fallback, admin build/run
-      steps, expected output, troubleshooting
-- [x] git: local repo, committed by step author identity; NOT pushed anywhere
+      steps, expected output, troubleshooting; updated 2026-11-13 with the
+      race-free `--wait` smoke-test flow, bare-PID syntax note, `git pull`
+      update step, and the system32 relative-path troubleshooting row
+- [x] git: **pushed to PUBLIC repo https://github.com/Yavdhesh/appraan-windows**
+      (user chose public from day one, 2026-11-13; Step 1 commit `848484b`,
+      RUNBOOK pointer `2bb4ccd`, `winload --wait` fix `e0c522f`) — verified
+      via `git log`/`git remote -v` 2026-11-13 16:07 UTC. NOTE: this file
+      previously (incorrectly) said "NOT pushed anywhere" — corrected here;
+      the earlier push is confirmed by the user's own clone + `dotnet run`
+      from `C:\Windows\system32\appraan-windows` in chat 2026-11-13.
 
 ## Runtime-unverified (needs the user's Windows 11 machine)
 - Everything ETW: session creation, kernel keyword enablement, event flow,
