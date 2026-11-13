@@ -57,7 +57,10 @@ state per step: [STATUS.md](STATUS.md).
 ## Reading the output
 
 Every label the tools print, what it means, its unit, and how to read a
-sample value.
+sample value. For the ideas *behind* the labels — what an episode is,
+the three lives of a thread (running, blocked, ready), wait reasons in
+plain words, and why Disk can honestly be 0 — see
+[Understanding the numbers](docs/concepts.md).
 
 **Units used in this project**
 

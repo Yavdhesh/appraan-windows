@@ -466,3 +466,10 @@ unnamed wait reasons printed as bare numbers; fixed in `e58be74`
 (full NT KWAIT_REASON mapping + `WaitReason(<n>)` fallback, plus
 units lines in winops/winoffcpu banners). Evidence:
 evidence/step4-winoffcpu-verified-2026-11-13.md.
+
+## Concepts guide — 2026-11-13
+docs/concepts.md ("Understanding the numbers — a plain-language
+guide") added at the user's request: episodes, running/blocked/ready,
+wait reasons in plain words, why Disk can honestly be 0, and a units
+cheat sheet — worked numbers only from the verified runs. Linked from
+README's "Reading the output" section.
