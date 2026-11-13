@@ -1,9 +1,80 @@
 # Appraan.Windows — STATUS
 
-## Step 2: wintcplife (tcplife equivalent) — CODE COMPLETE, COMPILE-VERIFIED (2026-11-13)
-Runtime is UNVERIFIED — per the verification rule it is "done" only after
-the RUNBOOK.md Step 2 test passes on the user's Windows 11 machine.
+## Step 2: wintcplife (tcplife equivalent) — FUNCTIONAL on Win11, byte-accounting fix applied, RE-VERIFICATION pending
+Functional on Win11 (2026-11-13 run: lines/endpoints/durations correct,
+222+ closed tracked), byte-accounting fix applied, RE-VERIFICATION pending.
 
+### What the first Win11 run proved (winload pid 54732, 132 iterations)
+- ✅ Connection lines print on close with correct endpoints and plausible
+      durations (~0.3–0.8 ms); 222+ connections closed and tracked.
+- ✅ ETW `size` on send/recv is payload size — settled by the numbers
+      below (each socket moves exactly 32 B each way per iteration).
+- ❌ Byte attribution was WRONG, in a very specific pattern: client-side
+      records showed TX_KB=RX_KB=0.06 (exactly double the expected
+      0.03/0.03), accepted server-side records showed 0.00/0.00, and
+      phantom duplicate lines appeared (same tuple as a real record,
+      0.00/0.00 bytes, 0.0 ms).
+
+### Root cause (confirmed in the old code)
+The old table was keyed by (ProcessId, local, remote) and `FindEntry`
+searched it in BOTH orientations, with connid as a guarded secondary
+index. On same-process loopback the client entry (53623→53567) and the
+accepted entry (53567→53623) are exact mirror tuples, so:
+1. `OpenConnection` for the Accept event found the CLIENT entry via the
+   swapped-orientation search and "adopted" it — the accepted entry was
+   never created.
+2. Worse, that lookup called `RegisterConnId`, binding the ACCEPTED
+   connection's connid to the client entry. The `Fits` endpoint guard
+   could not catch the poisoning: mirror tuples fit in either orientation.
+3. From then on the server's Send (echo) and Recv (request) events hit the
+   poisoned connid index first and landed on the client record → client
+   TX and RX each grew by the server's 32 B → the symmetric 0.06/0.06.
+4. The accepted side's Disconnect then matched nothing (or an
+   already-closed entry), and `CloseConnection` fabricated the
+   zero-duration orphan stub → the phantom duplicate lines.
+
+### The fix (this commit)
+- **connid is now the PRIMARY key**: the open table is keyed by
+  (ProcessId, connid); endpoints are needed only as a fallback key for
+  events whose connid is 0 (kept in the fixed per-event-kind orientation).
+- Endpoints and direction (`IsOutbound`: Connect → true, Accept → false,
+  data-created → unknown) are fixed ONCE at entry creation. Send/Recv for
+  a known connid just add bytes — Send is always the owning socket's TX,
+  Recv its RX — so no orientation is ever re-derived per data event.
+- A Disconnect for an unknown connid creates NO record; it increments the
+  new `TcpConnectionTracker.UnmatchedDisconnects` diagnostics counter,
+  printed in wintcplife's exit summary.
+- connid reuse: closed connids are remembered — trailing data events for
+  them are dropped as late arrivals; a Connect/Accept for a closed connid
+  starts a fresh generation; a Connect/Accept contradicting a still-open
+  entry's endpoints displaces it (old entry closed as estimated).
+- UDP: the tracker subscribes only to TcpIp* parser events (verified in
+  `TcpConnectionTracker.Attach`); UDP events never enter it. The UdpIp
+  subscriptions in KernelSession serve winscope's category counts only.
+- winscope untouched; its build and Linux-verified behaviours (platform
+  guard exit 1, usage exit 2 — re-checked for wintcplife too) unchanged.
+
+### Build after the fix (real output, this VM, .NET SDK 8.0.428)
+```
+  Appraan.Windows -> .../src/Appraan.Windows/bin/Release/net8.0/Appraan.Windows.dll
+  winscope -> .../src/winscope/bin/Release/net8.0/winscope.dll
+  winload -> .../src/winload/bin/Release/net8.0/winload.dll
+  wintcplife -> .../src/wintcplife/bin/Release/net8.0/wintcplife.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+```
+
+### Re-verification (user test — RUNBOOK.md Step 2)
+`git pull`, rebuild, then `winload --wait` in window A and
+`wintcplife --pid <winload pid> --seconds 25` in admin window B; press
+Enter in A. Expected after the fix, per winload iteration exactly 2
+records (client + accepted server): client TX≈RX≈0.03 KB, server
+TX≈RX≈0.03 KB, NO zero-byte phantom lines, durations ~0.3–0.8 ms, and an
+`unmatched disconnects` count (0 or small) in the exit summary.
+
+### Original Step 2 build notes (kept for reference)
 - [x] TraceEvent 3.1.8 TCP API verified by reflection against the restored
       NuGet package (NOT from memory): parser events TcpIpConnect/TcpIpAccept
       (TcpIpConnectTraceData), TcpIpSend (TcpIpSendTraceData), TcpIpRecv /
@@ -16,40 +87,15 @@ the RUNBOOK.md Step 2 test passes on the user's Windows 11 machine.
       KernelTraceEventParser (valid between Start and Stop) for typed-payload
       consumers. Purely additive — winscope's normalised EventReceived path
       is untouched and winscope still builds/behaves identically.
-- [x] Library: `TcpConnectionTracker` + `TcpConnectionRecord` (+
-      TcpConnectionState). Table keyed by (ProcessId, local endpoint,
-      remote endpoint); ETW's packet-perspective saddr/daddr is converted
-      per event kind (Accept/Recv: source is the remote side). A secondary
-      connid index — validated against the stored endpoints, so recycled
-      connids/PIDs can't merge connections — makes send/recv/disconnect
-      correlation orientation-proof. Bytes = sum of ETW `size` on send/recv;
-      retransmits counted separately, never double-counted. Connections
-      predating the trace are created on first data event with
-      EstimatedStart=true; a lone disconnect yields a zero-duration
-      estimated record instead of being dropped; never-closed entries stay
-      visible via GetOpenConnections().
 - [x] CLI: src/wintcplife — `wintcplife [--pid N] [--seconds N]` (no
       --seconds = until Ctrl+C, like BCC). Prints a tcplife-style line per
       closed connection (PID COMM LADDR:LPORT RADDR:RPORT TX_KB RX_KB MS),
       a 5 s live summary (open count), and an exit summary (closed count,
-      total TX/RX bytes, longest-lived connection, still-open count).
-      Bad args → usage + exit 2 (Linux-verified); off-Windows → clean
-      platform-guard message (Linux-verified).
-- [x] `dotnet build -c Release` → **Build succeeded, 0 warnings, 0 errors**
-      (all 4 projects: Appraan.Windows, winscope, winload, wintcplife)
-- [x] RUNBOOK.md: "Step 2 — wintcplife" section with the two-window test.
-
-## Runtime-unverified for Step 2 (user test — RUNBOOK.md Step 2)
-`winload --wait` in window A; `wintcplife --pid <winload pid> --seconds 25`
-in an admin window B; press Enter in A. Success = closed-connection lines
-appear, ≈2 per winload iteration (winload owns BOTH loopback ends), each
-with TX_KB ≈ RX_KB ≈ 0.03 (winload sends 32 B and reads a 32 B echo per
-connection; ETW `size` sums may differ slightly), small MS durations, and
-the exit summary's totals/longest-lived line. Open questions the run will
-answer: whether ETW send/recv `size` carries payload only, and whether the
-per-kind saddr/daddr orientation assumptions hold on real events (the
-connid index makes correlation robust either way; swapped byte direction
-on accepted sockets is the symptom to watch for).
+      total TX/RX bytes, longest-lived connection, still-open count, and —
+      since the fix — the unmatched-disconnects count).
+- [x] RUNBOOK.md: "Step 2 — wintcplife" section with the two-window test;
+      expected-output notes updated for the fix (0.03 KB on BOTH sides,
+      no phantom lines).
 
 ## Next (per DESIGN.md build order)
 3. Kernel ops by category + latency (FileIO/DiskIO/Registry/TCPIP pairs).

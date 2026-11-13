@@ -42,10 +42,13 @@ public enum TcpConnectionState
 /// <param name="Retransmits">Retransmitted segments observed (their bytes are NOT double-counted in <paramref name="BytesSent"/>).</param>
 /// <param name="State">Open or Closed.</param>
 /// <param name="EstimatedStart">
-/// True when the connect/accept event was never seen (the connection was
-/// already open when tracing started, or its first observed event was data):
-/// <paramref name="StartTime"/> is the first-seen time, so
-/// <paramref name="DurationMs"/> is a lower bound on the true lifetime.
+/// True when the timing is not fully observed: either the connect/accept
+/// event was never seen (the connection was already open when tracing
+/// started, or its first observed event was data — then
+/// <paramref name="StartTime"/> is the first-seen time and
+/// <paramref name="DurationMs"/> is a lower bound on the true lifetime),
+/// or the entry was closed early because its connid was reused by a new
+/// connection before its disconnect was seen.
 /// </param>
 public sealed record TcpConnectionRecord(
     int ProcessId,

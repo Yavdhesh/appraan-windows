@@ -12,33 +12,62 @@ namespace Appraan.Windows;
 /// <see cref="ConnectionClosed"/> with a final <see cref="TcpConnectionRecord"/>
 /// when each connection disconnects.
 ///
-/// <para><b>Correlation.</b> The table is keyed by
-/// (ProcessId, local endpoint, remote endpoint). ETW reports each event's
-/// <c>saddr/daddr</c> from the <i>packet's</i> perspective, not the
-/// connection's: for Send the source is the local endpoint, for Recv the
-/// source is the remote sender, for Accept the source is the remote
-/// initiator. The tracker converts per event kind so Local/Remote in the
-/// table are always from the owning process's perspective. As a second,
-/// orientation-proof index it also remembers each event's <c>connid</c>
-/// (the kernel's per-connection identifier, present in every TCP event):
-/// a connid hit is only trusted when the event's endpoints actually fit the
-/// stored connection, which keeps a recycled connid (or a recycled PID —
-/// same caveat, plus the full endpoint tuple must also collide) from
-/// merging two different connections.</para>
+/// <para><b>Correlation — connid is the primary key.</b> Every ETW TCP event
+/// payload carries <c>connid</c>, the kernel's per-connection identifier,
+/// and the open table is keyed by (ProcessId, connid). A connection's
+/// endpoints and direction are fixed <i>once</i>, when its entry is created
+/// (see below); send/recv events for a known connid then simply add bytes —
+/// Send always means "bytes sent by the owning socket", Recv "bytes
+/// received by it", so no per-event orientation guessing is involved.</para>
+///
+/// <para><b>Why not the endpoint tuple?</b> The first Step 2 build keyed the
+/// table by (ProcessId, local, remote) and searched it in both orientations,
+/// with the connid as a "guarded" secondary index. On same-process loopback
+/// (e.g. winload, which owns both ends of its connections) the client entry
+/// and the accepted-server entry are exact mirror tuples, so the swapped
+/// search matched the <i>peer's</i> entry: an Accept "adopted" the client
+/// entry and registered the accepted connection's connid against it, the
+/// endpoint-fit guard could not tell mirror tuples apart, and from then on
+/// the server's send/recv bytes landed on the client record (doubling its
+/// TX and RX) while the server record starved and its disconnect fabricated
+/// a zero-duration stub. The 2026-11-13 Windows 11 run showed exactly that
+/// signature (client 0.06/0.06 KB instead of 0.03/0.03, server 0.00/0.00,
+/// phantom duplicate lines). Tuple keys survive only as the fallback for
+/// events whose connid is 0.</para>
+///
+/// <para><b>Entry creation and orientation.</b> ETW reports each event's
+/// <c>saddr/daddr</c> from the packet's perspective. Each event kind is
+/// normalised exactly once, at entry creation: Connect/Send/Retransmit/
+/// Reconnect/Disconnect are reported by the owning socket itself, so
+/// source = local; Accept/Recv are delivered to the owning socket, so
+/// destination = local. An entry created by Connect is outbound, by Accept
+/// inbound; an entry created by a data event has unknown direction and
+/// <see cref="TcpConnectionRecord.EstimatedStart"/> set. Disconnects whose
+/// connid was never seen create <i>no</i> record — they only increment
+/// <see cref="UnmatchedDisconnects"/>.</para>
+///
+/// <para><b>connid reuse.</b> Closed connids are remembered. A data event
+/// arriving for a closed connid is a late arrival of the already-reported
+/// connection and is dropped; a Connect/Accept for a closed connid starts a
+/// fresh entry (new generation). A Connect/Accept for a connid that is
+/// still open but whose endpoints contradict the stored entry likewise
+/// wins: the old entry is closed as estimated and replaced. (The remembered
+/// closed set grows by one entry per closed connection for the tracker's
+/// lifetime — acceptable for a tracing tool's session lengths.)</para>
 ///
 /// <para><b>Byte accounting.</b> BytesSent/BytesReceived sum the <c>size</c>
-/// field of ETW send/recv events, i.e. payload bytes as the kernel reports
-/// them. Retransmit events only bump <see cref="TcpConnectionRecord.Retransmits"/>;
-/// their bytes are already counted from the original send.</para>
+/// field of ETW send/recv events attributed by connid, i.e. payload bytes
+/// as the kernel reports them, per owning socket. Retransmit events only
+/// bump <see cref="TcpConnectionRecord.Retransmits"/>; their bytes were
+/// already counted from the original send.</para>
 ///
 /// <para><b>Partial visibility.</b> A connection already open when tracing
 /// starts has no connect event: its entry is created on the first observed
 /// data event with <see cref="TcpConnectionRecord.EstimatedStart"/> set, so
-/// its duration is a lower bound. A disconnect with no prior events at all
-/// still produces a (zero-duration, estimated) closed record rather than
-/// being dropped. Entries whose disconnect is never observed (dropped ETW
-/// events, abrupt process death) stay Open for the tracker's lifetime;
-/// callers can inspect them via <see cref="GetOpenConnections"/>.</para>
+/// its duration is a lower bound. Entries whose disconnect is never
+/// observed (dropped ETW events, abrupt process death) stay Open for the
+/// tracker's lifetime; callers can inspect them via
+/// <see cref="GetOpenConnections"/>.</para>
 ///
 /// <para>Thread safety: event handlers run on the ETW dispatch thread, but
 /// all state is guarded by one lock so <see cref="OpenCount"/> and
@@ -47,15 +76,37 @@ namespace Appraan.Windows;
 /// </summary>
 public sealed class TcpConnectionTracker
 {
-    /// <summary>Identity of one connection in the table.</summary>
+    /// <summary>
+    /// Identity of one connection in the table. When
+    /// <see cref="ConnId"/> is non-zero the key is just (ProcessId, ConnId)
+    /// and the endpoint fields are null/0 — endpoints live on the entry.
+    /// When ConnId is 0 (an event with no kernel connection id) the key
+    /// falls back to the endpoint tuple in the fixed per-event-kind
+    /// orientation (see <see cref="EndpointsFor"/>).
+    /// </summary>
     private readonly record struct ConnKey(
-        int ProcessId, IPAddress LocalAddress, int LocalPort, IPAddress RemoteAddress, int RemotePort);
+        int ProcessId, ulong ConnId,
+        IPAddress? LocalAddress, int LocalPort, IPAddress? RemoteAddress, int RemotePort);
 
     /// <summary>Mutable per-connection state while the connection is open.</summary>
     private sealed class Entry
     {
         public required ConnKey Key { get; init; }
         public required string ProcessName { get; set; }
+        public required IPAddress LocalAddress { get; init; }
+        public required int LocalPort { get; init; }
+        public required IPAddress RemoteAddress { get; init; }
+        public required int RemotePort { get; init; }
+
+        /// <summary>
+        /// Direction fixed once at creation: true for Connect-created,
+        /// false for Accept-created, null when the entry was created by a
+        /// data event (direction unknowable — but also unnecessary, since
+        /// send/recv byte attribution is per owning socket, not per
+        /// direction).
+        /// </summary>
+        public required bool? IsOutbound { get; init; }
+
         public required DateTime StartTime { get; init; }
         public required bool EstimatedStart { get; init; }
         public long BytesSent;
@@ -73,9 +124,10 @@ public sealed class TcpConnectionTracker
     private readonly int? _processIdFilter;
     private readonly object _gate = new();
     private readonly Dictionary<ConnKey, Entry> _open = new();
-    private readonly Dictionary<(int ProcessId, ulong ConnId), ConnKey> _byConnId = new();
+    private readonly HashSet<(int ProcessId, ulong ConnId)> _closedConnIds = new();
     private readonly Dictionary<int, string> _processNames = new();
     private DateTime _latestTimestamp;
+    private long _unmatchedDisconnects;
     private int _attached;
 
     /// <param name="processIdFilter">
@@ -85,9 +137,11 @@ public sealed class TcpConnectionTracker
     public TcpConnectionTracker(int? processIdFilter = null) => _processIdFilter = processIdFilter;
 
     /// <summary>
-    /// Raised once per connection when its disconnect is observed, with the
-    /// final record. Raised on the ETW dispatch thread, outside the tracker's
-    /// lock; handlers should be cheap (format/print, enqueue).
+    /// Raised once per connection when its disconnect is observed (or when
+    /// a still-open entry is displaced by a contradicting Connect/Accept
+    /// for a reused connid — then the record's EstimatedStart is set),
+    /// with the final record. Raised on the ETW dispatch thread, outside
+    /// the tracker's lock; handlers should be cheap (format/print, enqueue).
     /// </summary>
     public event Action<TcpConnectionRecord>? ConnectionClosed;
 
@@ -98,9 +152,24 @@ public sealed class TcpConnectionTracker
     }
 
     /// <summary>
+    /// Disconnect events observed for a connid that was never seen (or was
+    /// already closed). No record is fabricated for these; the count makes
+    /// the visibility loss diagnosable and is shown in wintcplife's exit
+    /// summary.
+    /// </summary>
+    public long UnmatchedDisconnects
+    {
+        get { lock (_gate) return _unmatchedDisconnects; }
+    }
+
+    /// <summary>
     /// Subscribe this tracker to all TCP events (v4 and v6) of a kernel
     /// parser — typically <see cref="KernelSession.KernelParser"/> after
     /// <see cref="KernelSession.Start"/>. May only be called once.
+    /// UDP parser events are deliberately not subscribed: UDP has no
+    /// connection lifecycle and must never enter this tracker. (KernelSession
+    /// subscribes UDP separately, for winscope's coarse category counts
+    /// only.)
     /// </summary>
     public void Attach(KernelTraceEventParser parser)
     {
@@ -154,6 +223,38 @@ public sealed class TcpConnectionTracker
     private static TcpEvent Map(EventKind kind, TcpIpV6TraceData d) =>
         new(kind, d.connid, d.ProcessID, d.ProcessName, d.saddr, d.sport, d.daddr, d.dport, d.size, d.TimeStamp);
 
+    // ---- orientation: decided once per event kind, never re-derived ----
+
+    /// <summary>
+    /// True when the event is reported by the owning socket itself, so the
+    /// packet's source is the socket's local endpoint. Accept/Recv are
+    /// delivered TO the owning socket, so there the destination is local.
+    /// Because every kind is normalised by this one rule, all events of one
+    /// socket yield the same (local, remote) — and for connid-keyed
+    /// entries the result is used only at creation time anyway.
+    /// </summary>
+    private static bool SourceIsLocal(EventKind kind) => kind is
+        EventKind.Connect or EventKind.Send or EventKind.Retransmit or
+        EventKind.Reconnect or EventKind.Disconnect;
+
+    /// <summary>The event's endpoints from the owning socket's perspective.</summary>
+    private static (IPAddress Local, int LocalPort, IPAddress Remote, int RemotePort) EndpointsFor(TcpEvent e) =>
+        SourceIsLocal(e.Kind)
+            ? (e.SAddr, e.SPort, e.DAddr, e.DPort)
+            : (e.DAddr, e.DPort, e.SAddr, e.SPort);
+
+    /// <summary>
+    /// The table key for an event: (ProcessId, connid) when the event
+    /// carries a connid; the normalised endpoint tuple when it does not.
+    /// </summary>
+    private static ConnKey KeyFor(TcpEvent e)
+    {
+        if (e.ConnId != 0)
+            return new ConnKey(e.ProcessId, e.ConnId, null, 0, null, 0);
+        var (local, localPort, remote, remotePort) = EndpointsFor(e);
+        return new ConnKey(e.ProcessId, 0, local, localPort, remote, remotePort);
+    }
+
     // ---- event handling (all state changes under _gate) ----
 
     private void Handle(TcpEvent e)
@@ -170,30 +271,31 @@ public sealed class TcpConnectionTracker
             switch (e.Kind)
             {
                 case EventKind.Connect:
-                    OpenConnection(e, localIsSource: true);
+                    closed = OnConnectOrAccept(e, isConnect: true);
                     break;
                 case EventKind.Accept:
-                    // Accept events are reported from the packet's perspective:
-                    // source = the remote initiator, destination = our listener.
-                    OpenConnection(e, localIsSource: false);
-                    break;
-                case EventKind.Reconnect:
-                    GetOrCreate(e, localIsSource: true, estimatedStart: true);
+                    closed = OnConnectOrAccept(e, isConnect: false);
                     break;
                 case EventKind.Send:
-                    GetOrCreate(e, localIsSource: true, estimatedStart: true).BytesSent += e.Size;
+                    if (GetOrCreateDataEntry(e) is { } sent)
+                        sent.BytesSent += e.Size;
                     break;
                 case EventKind.Recv:
-                    // Recv events: source = the remote sender, destination = us.
-                    GetOrCreate(e, localIsSource: false, estimatedStart: true).BytesReceived += e.Size;
+                    if (GetOrCreateDataEntry(e) is { } received)
+                        received.BytesReceived += e.Size;
+                    break;
+                case EventKind.Reconnect:
+                    GetOrCreateDataEntry(e);
                     break;
                 case EventKind.Retransmit:
-                    // Bytes were already counted on the original send.
-                    if (FindEntry(e, localIsSource: null) is { } entry)
-                        entry.Retransmits++;
+                    // Never creates an entry: a retransmit implies a send
+                    // that was (or should have been) observed, and its bytes
+                    // were already counted then.
+                    if (FindOpen(e) is { } retransmitted)
+                        retransmitted.Retransmits++;
                     break;
                 case EventKind.Disconnect:
-                    closed = CloseConnection(e);
+                    closed = OnDisconnect(e);
                     break;
             }
         }
@@ -202,123 +304,116 @@ public sealed class TcpConnectionTracker
             ConnectionClosed?.Invoke(closed);
     }
 
-    /// <summary>Register a freshly observed connection (connect/accept).</summary>
-    private void OpenConnection(TcpEvent e, bool localIsSource)
+    /// <summary>
+    /// Handle a Connect/Accept: create the entry (fixing its endpoints and
+    /// direction), adopt a live duplicate, or — when the connid was reused
+    /// and the stored endpoints contradict the new connection — displace
+    /// the old entry, which is returned closed-as-estimated.
+    /// Caller must hold <see cref="_gate"/>.
+    /// </summary>
+    private TcpConnectionRecord? OnConnectOrAccept(TcpEvent e, bool isConnect)
     {
-        // An entry can already exist (created by an out-of-order data event,
-        // or a duplicate connect): adopt it rather than resetting its start
-        // time and byte counters.
-        if (FindEntry(e, localIsSource) is not null)
-            return;
-        CreateEntry(e, localIsSource, estimatedStart: false);
+        var key = KeyFor(e);
+        var (local, localPort, remote, remotePort) = EndpointsFor(e);
+
+        if (_open.TryGetValue(key, out var existing))
+        {
+            bool contradicts = e.ConnId != 0 &&
+                !(existing.LocalAddress.Equals(local) && existing.LocalPort == localPort &&
+                  existing.RemoteAddress.Equals(remote) && existing.RemotePort == remotePort);
+            if (!contradicts)
+                return null; // Duplicate/out-of-order connect for the live entry: adopt it.
+
+            // connid reuse with a still-open entry: the new connection
+            // wins. The old one's disconnect was never observed, so it is
+            // closed as estimated at this event's timestamp.
+            _open.Remove(key);
+            if (e.ConnId != 0)
+                _closedConnIds.Add((e.ProcessId, e.ConnId));
+            var displaced = ToRecord(existing, e.TimeStamp, forceEstimated: true);
+            CreateEntry(e, key, isOutbound: isConnect, estimatedStart: false);
+            return displaced;
+        }
+
+        CreateEntry(e, key, isOutbound: isConnect, estimatedStart: false);
+        return null;
     }
 
-    private Entry GetOrCreate(TcpEvent e, bool localIsSource, bool estimatedStart) =>
-        FindEntry(e, localIsSource) ?? CreateEntry(e, localIsSource, estimatedStart);
-
-    private Entry CreateEntry(TcpEvent e, bool localIsSource, bool estimatedStart)
+    /// <summary>
+    /// Find the open entry for a data event, creating it (estimated) when
+    /// the connection predates the trace or its connect was dropped.
+    /// Returns null for a late event of an already-closed connid — see the
+    /// class remarks on connid reuse. Caller must hold <see cref="_gate"/>.
+    /// </summary>
+    private Entry? GetOrCreateDataEntry(TcpEvent e)
     {
-        var key = KeyFor(e, localIsSource);
+        var key = KeyFor(e);
+        if (_open.TryGetValue(key, out var entry))
+            return entry;
+
+        if (e.ConnId != 0 && _closedConnIds.Contains((e.ProcessId, e.ConnId)))
+            return null; // Trailing event of a connection already reported closed.
+
+        return CreateEntry(e, key, isOutbound: null, estimatedStart: true);
+    }
+
+    /// <summary>The open entry an event belongs to, if any. Caller must hold <see cref="_gate"/>.</summary>
+    private Entry? FindOpen(TcpEvent e) =>
+        _open.TryGetValue(KeyFor(e), out var entry) ? entry : null;
+
+    private Entry CreateEntry(TcpEvent e, ConnKey key, bool? isOutbound, bool estimatedStart)
+    {
+        var (local, localPort, remote, remotePort) = EndpointsFor(e);
         var entry = new Entry
         {
             Key = key,
             ProcessName = ResolveProcessName(e.ProcessId, e.ProcessName),
+            LocalAddress = local,
+            LocalPort = localPort,
+            RemoteAddress = remote,
+            RemotePort = remotePort,
+            IsOutbound = isOutbound,
             StartTime = e.TimeStamp,
             EstimatedStart = estimatedStart,
         };
         _open[key] = entry;
-        RegisterConnId(e, key);
+        if (e.ConnId != 0)
+            _closedConnIds.Remove((e.ProcessId, e.ConnId)); // a fresh generation begins
         return entry;
     }
 
-    private TcpConnectionRecord CloseConnection(TcpEvent e)
-    {
-        var entry = FindEntry(e, localIsSource: null);
-        if (entry is null)
-        {
-            // Disconnect for a connection we never saw any other event for:
-            // report it as a zero-duration estimated record instead of
-            // dropping it (tcplife would miss it entirely; a visible stub
-            // makes dropped-event situations diagnosable).
-            var orphanKey = KeyFor(e, localIsSource: true);
-            var orphan = new Entry
-            {
-                Key = orphanKey,
-                ProcessName = ResolveProcessName(e.ProcessId, e.ProcessName),
-                StartTime = e.TimeStamp,
-                EstimatedStart = true,
-            };
-            return ToRecord(orphan, endTime: e.TimeStamp);
-        }
-
-        _open.Remove(entry.Key);
-        if (e.ConnId != 0 &&
-            _byConnId.TryGetValue((e.ProcessId, e.ConnId), out var mapped) &&
-            mapped.Equals(entry.Key))
-        {
-            _byConnId.Remove((e.ProcessId, e.ConnId));
-        }
-        return ToRecord(entry, endTime: e.TimeStamp);
-    }
-
     /// <summary>
-    /// Find the open entry an event belongs to: first via the connid index
-    /// (trusted only if the event's endpoints fit the stored connection —
-    /// guards against connid reuse), then via the endpoint tuple in the
-    /// event kind's preferred orientation, then in the swapped orientation.
-    /// A successful tuple lookup (re)registers the connid mapping.
+    /// Handle a Disconnect: close and return the entry when one is open.
+    /// An unmatched disconnect fabricates NO record (the zero-duration
+    /// stubs that produced in the first Step 2 build were indistinguishable
+    /// from real connections) — it only bumps
+    /// <see cref="UnmatchedDisconnects"/>. Caller must hold
+    /// <see cref="_gate"/>.
     /// </summary>
-    private Entry? FindEntry(TcpEvent e, bool? localIsSource)
+    private TcpConnectionRecord? OnDisconnect(TcpEvent e)
     {
-        if (e.ConnId != 0 &&
-            _byConnId.TryGetValue((e.ProcessId, e.ConnId), out var byId) &&
-            _open.TryGetValue(byId, out var indexed) &&
-            Fits(indexed.Key, e))
+        var key = KeyFor(e);
+        if (_open.Remove(key, out var entry))
         {
-            return indexed;
+            if (e.ConnId != 0)
+                _closedConnIds.Add((e.ProcessId, e.ConnId));
+            return ToRecord(entry, e.TimeStamp);
         }
 
-        bool first = localIsSource ?? true;
-        foreach (bool orientation in new[] { first, !first })
-        {
-            var key = KeyFor(e, orientation);
-            if (_open.TryGetValue(key, out var entry))
-            {
-                RegisterConnId(e, key);
-                return entry;
-            }
-        }
+        _unmatchedDisconnects++;
         return null;
     }
 
-    /// <summary>True when the event's endpoints match the key in either orientation.</summary>
-    private static bool Fits(ConnKey key, TcpEvent e) =>
-        (key.LocalAddress.Equals(e.SAddr) && key.LocalPort == e.SPort &&
-         key.RemoteAddress.Equals(e.DAddr) && key.RemotePort == e.DPort) ||
-        (key.LocalAddress.Equals(e.DAddr) && key.LocalPort == e.DPort &&
-         key.RemoteAddress.Equals(e.SAddr) && key.RemotePort == e.SPort);
-
-    private static ConnKey KeyFor(TcpEvent e, bool localIsSource) =>
-        localIsSource
-            ? new ConnKey(e.ProcessId, e.SAddr, e.SPort, e.DAddr, e.DPort)
-            : new ConnKey(e.ProcessId, e.DAddr, e.DPort, e.SAddr, e.SPort);
-
-    private void RegisterConnId(TcpEvent e, ConnKey key)
-    {
-        if (e.ConnId != 0)
-            _byConnId[(e.ProcessId, e.ConnId)] = key;
-    }
-
-    private TcpConnectionRecord ToRecord(Entry entry, DateTime? endTime)
+    private TcpConnectionRecord ToRecord(Entry entry, DateTime? endTime, bool forceEstimated = false)
     {
         var end = endTime ?? _latestTimestamp;
         return new TcpConnectionRecord(
             entry.Key.ProcessId,
             entry.ProcessName,
-            entry.Key.LocalAddress,
-            entry.Key.LocalPort,
-            entry.Key.RemoteAddress,
-            entry.Key.RemotePort,
+            entry.LocalAddress,
+            entry.LocalPort,
+            entry.RemoteAddress,
+            entry.RemotePort,
             entry.StartTime,
             endTime,
             Math.Max(0, (end - entry.StartTime).TotalMilliseconds),
@@ -326,7 +421,7 @@ public sealed class TcpConnectionTracker
             entry.BytesReceived,
             entry.Retransmits,
             endTime is null ? TcpConnectionState.Open : TcpConnectionState.Closed,
-            entry.EstimatedStart);
+            entry.EstimatedStart || forceEstimated);
     }
 
     /// <summary>

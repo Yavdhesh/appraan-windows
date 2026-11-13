@@ -202,14 +202,26 @@ PID    COMM           LADDR:LPORT              RADDR:RPORT                 TX_KB
 33108  winload        127.0.0.1:55453          127.0.0.1:61339              0.03     0.03       4.1
 ```
 
-- ✅ **TX_KB ≈ RX_KB ≈ 0.03 per connection** — winload sends exactly 32
-  bytes and reads a 32-byte echo per connection (32 bytes = 0.03 KB; the
-  ETW `size` fields are what get summed, so small deviations are fine and
-  worth pasting back verbatim).
-- ✅ **MS** is small (each connection lives only for one request/echo).
+- ✅ **TX_KB ≈ RX_KB ≈ 0.03 on BOTH lines of each pair** — winload sends
+  exactly 32 bytes and reads a 32-byte echo per connection (32 bytes =
+  0.03 KB; the ETW `size` fields are what get summed, so small deviations
+  are fine and worth pasting back verbatim). The client-side line and the
+  accepted server-side line each carry their OWN socket's 32 out / 32 in:
+  if the client line shows 0.06/0.06 and its twin 0.00/0.00, the byte
+  accounting is cross-attributing the two ends (that was the pre-fix bug —
+  make sure you `git pull`ed and rebuilt).
+- ✅ **No phantom lines** — each connection prints exactly once. A second
+  line repeating an earlier line's endpoints with 0.00/0.00 bytes and
+  0.0 ms is a fabricated stub from an unmatched disconnect; the fixed
+  build never prints those (it counts them in the summary instead — see
+  below).
+- ✅ **MS** is small — roughly 0.3–0.8 ms for winload's connections (each
+  lives only for one request/echo).
 - ✅ Final summary reports the total connections closed (≈ 2× winload's
   iteration count), total bytes, and the longest-lived connection, with
-  `still open: 0` or a small number.
+  `still open: 0` or a small number, plus an
+  `unmatched disconnects (start never seen, no record printed)` count —
+  0 or small is normal (a disconnect can outrun the trace start).
 
 Also try it without `--pid` sometime — `wintcplife --seconds 20` shows
 every process's connections on the machine, like the real `tcplife`.
@@ -222,6 +234,7 @@ every process's connections on the machine, like the real `tcplife`.
 | `usage: wintcplife [--pid N] [--seconds N]` | Bad flag or non-numeric value. Note the `--` before `--pid` is required with `dotnet run` so the flags reach wintcplife, not dotnet. |
 | Header prints but no connection lines | winload's Enter wasn't pressed while wintcplife was running, or the pid is wrong. Redo with a fresh `winload -- --wait` and its new pid. |
 | Lines appear but TX/RX are 0.00 | Paste the output back — that would mean ETW send/recv `size` fields aren't flowing as expected and the byte accounting needs a look. |
+| A connection prints twice; the copy shows 0.00/0.00 and 0.0 ms, and/or one side shows 0.06 KB while its twin shows 0.00 | Pre-fix build — the old tracker cross-attributed the two ends of loopback connections and fabricated stub records from lone disconnects. `git pull`, rebuild, re-run. |
 
 Paste the wintcplife output (a few connection lines + the summary) back to
 Muse Ram — success or failure, the exact numbers are what Step 3 gets

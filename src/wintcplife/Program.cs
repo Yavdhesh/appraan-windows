@@ -108,6 +108,7 @@ if (longest is not null)
                       $"{Endpoint(longest.LocalAddress, longest.LocalPort)} -> " +
                       $"{Endpoint(longest.RemoteAddress, longest.RemotePort)} — {longest.DurationMs:0.0} ms");
 Console.WriteLine($"still open (never seen to close): {tracker.OpenCount}");
+Console.WriteLine($"unmatched disconnects (start never seen, no record printed): {tracker.UnmatchedDisconnects}");
 if (closedCount == 0)
     Console.WriteLine("note: no connections closed in the window — was the target making short-lived TCP connections?");
 return 0;
