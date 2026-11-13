@@ -318,7 +318,21 @@ internal static class KernelJson
                 firstKind = false;
                 sb.Append(Str(kv.Key[prefix.Length..])).Append(':').Append(kv.Value);
             }
-            sb.Append("}}");
+            sb.Append('}');
+            // Latency histogram with winops' exact bucket labels — only
+            // for categories that measured latencies (File, Disk today).
+            if (s.LatencyCount > 0)
+            {
+                sb.Append(",\"hist\":{");
+                for (int b = 0; b < OpsLatencyHistogram.Labels.Count; b++)
+                {
+                    if (b > 0) sb.Append(',');
+                    sb.Append(Str(OpsLatencyHistogram.Labels[b])).Append(':')
+                      .Append(b < s.LatencyHistogram.Count ? s.LatencyHistogram[b] : 0);
+                }
+                sb.Append('}');
+            }
+            sb.Append('}');
         }
         sb.Append("],\"diagnostics\":{");
         sb.Append("\"pendingFileOps\":").Append(diag.PendingOperations);
