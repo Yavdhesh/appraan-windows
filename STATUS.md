@@ -45,3 +45,10 @@ the RUNBOOK.md smoke test passes on the user's Windows 11 machine
 ## Next (per DESIGN.md build order)
 2. tcplife equivalent — TCP connection lifecycle per process, using the
    TcpIp typed events already wired in KernelSession.
+
+## Runtime verification — 2026-11-13 (user's Windows 11, build 26300)
+- Smoke test PASSED: winload pid 33108 observed by winscope — Tcp=89, File=296,
+  Disk=0 (expected: cached file IO produces no physical DiskIO), Other=369,
+  total 754 events for the target PID out of 256,921 session-wide in ~11 s.
+  Per-PID filtering confirmed working against the full kernel firehose.
+- Step 1 is now DONE per the project verification rule (real run, known workload).
