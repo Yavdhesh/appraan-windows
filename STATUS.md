@@ -276,3 +276,11 @@ the RUNBOOK.md smoke test passes on the user's Windows 11 machine
   not a tracker artefact (byte totals and counts are exact; 300 ms is not an
   iteration-period multiple).
 - Step 2 (wintcplife) is DONE per the verification rule.
+
+## Step 3 VERIFIED — 2026-11-13 (user's Win11, winload pid 9280, N=108)
+File.Write exactly N (108); File.Read N+8; Network kinds exact pairs
+(Connect/Accept 108/108, Disconnect/Send 216=2N, Recv 217); File latency
+pairing covered 2802/2802 ops (avg 15.5us, 90.7% <50us); Disk 0 (cached);
+unmatched completions 16 (0.6%, in-flight at start). Evidence:
+evidence/2026-11-13-step3-winops-verification.md. Optional --registry run
+not yet exercised.
