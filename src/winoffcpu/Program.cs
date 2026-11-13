@@ -65,6 +65,7 @@ var processing = Task.Run(() => session.ProcessEvents(cts.Token));
 
 string limit = seconds > 0 ? $"for {seconds}s" : "until Ctrl+C";
 Console.WriteLine($"winoffcpu: watching pid {pid} {limit} (session '{KernelSession.SessionName}').");
+Console.WriteLine("all times are in milliseconds (ms)");
 
 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 try

@@ -47,7 +47,11 @@ namespace Appraan.Windows;
 ///
 /// <para><b>Reason labels.</b> An episode's label is fixed at switch-out:
 /// if the outgoing thread entered a wait (OldThreadState = Wait), the
-/// label is the kernel's wait reason (Executive, UserRequest, ...). If it
+/// label is the kernel's wait reason (Executive, UserRequest, ...). The
+/// TraceEvent enum names only the classic subset, so values it leaves
+/// unnamed are mapped through the full NT KWAIT_REASON table (WrQueue,
+/// WrLpcReply, ...) and anything beyond the table falls back to
+/// <c>WaitReason(&lt;n&gt;)</c> — see <c>WaitReasonLabel</c>. If it
 /// was switched out while still runnable (state = Ready) it did not
 /// block — it lost the CPU — and the label is <c>Preempted</c>: in
 /// off-CPU terms that is scheduling delay, and folding it into a wait
@@ -402,10 +406,81 @@ public sealed class OffCpuTracker
     /// </summary>
     private static string ReasonLabel(ThreadState state, ThreadWaitReason reason) => state switch
     {
-        ThreadState.Wait => reason.ToString(),
+        ThreadState.Wait => WaitReasonLabel(reason),
         ThreadState.Ready => "Preempted",
         _ => state.ToString(),
     };
+
+    /// <summary>
+    /// NT KWAIT_REASON names, by integer value. The TraceEvent
+    /// <see cref="ThreadWaitReason"/> enum names only the classic subset
+    /// (0–14, with its own spellings — e.g. 3 is "SystemAllocation" there,
+    /// 4 is "ExecutionDelay"); the kernel also reports the Wr* family
+    /// (15–39), which the enum leaves unnamed and <c>ToString()</c> would
+    /// render as a bare number. This table is consulted only for values
+    /// the enum does not name, so enum spellings always win where they
+    /// exist. The Wr* names are version-dependent NT kernel naming
+    /// (KWAIT_REASON in the WDK); values beyond this table fall back to
+    /// the numeric <c>WaitReason(&lt;n&gt;)</c> form rather than a
+    /// guessed name — honest, no fabrication.
+    /// </summary>
+    private static readonly string[] NtWaitReasonNames =
+    {
+        "Executive",        // 0
+        "FreePage",         // 1
+        "PageIn",           // 2
+        "PoolAllocation",   // 3 (enum: SystemAllocation)
+        "DelayExecution",   // 4 (enum: ExecutionDelay)
+        "Suspended",        // 5
+        "UserRequest",      // 6
+        "WrExecutive",      // 7
+        "WrFreePage",       // 8
+        "WrPageIn",         // 9
+        "WrPoolAllocation", // 10
+        "WrDelayExecution", // 11
+        "WrSuspended",      // 12
+        "WrUserRequest",    // 13
+        "WrEventPair",      // 14
+        "WrQueue",          // 15
+        "WrLpcReceive",     // 16
+        "WrLpcReply",       // 17
+        "WrVirtualMemory",  // 18
+        "WrPageOut",        // 19
+        "WrRendezvous",     // 20
+        "WrKeyedEvent",     // 21
+        "WrTerminated",     // 22
+        "WrProcessInSwap",  // 23
+        "WrCpuRateControl", // 24
+        "WrCalloutStack",   // 25
+        "WrKernel",         // 26
+        "WrResource",       // 27
+        "WrPushLock",       // 28
+        "WrMutex",          // 29
+        "WrQuantumEnd",     // 30
+        "WrDispatchInt",    // 31
+        "WrPreempted",      // 32
+        "WrYieldExecution", // 33
+        "WrFastMutex",      // 34
+        "WrGuardedMutex",   // 35
+        "WrRundown",        // 36
+        "WrAlertByThreadId",// 37
+        "WrDeferredPreempt",// 38
+        "WrPhysicalFault",  // 39
+    };
+
+    /// <summary>
+    /// The label for one wait reason: the enum's own name when it has one,
+    /// else the KWAIT_REASON table name, else <c>WaitReason(&lt;n&gt;)</c>.
+    /// </summary>
+    private static string WaitReasonLabel(ThreadWaitReason reason)
+    {
+        if (Enum.GetName(reason) is { } name)
+            return name;
+        int value = (int)reason;
+        if ((uint)value < (uint)NtWaitReasonNames.Length)
+            return NtWaitReasonNames[value];
+        return $"WaitReason({value})";
+    }
 
     private MutableThread GetOrAddLocked(int threadId, out bool created)
     {

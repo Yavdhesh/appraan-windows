@@ -46,11 +46,14 @@ public sealed record ThreadOffCpuStats(
 /// <summary>
 /// Off-CPU time grouped by why the thread left the CPU. The reason names
 /// are the <c>System.Diagnostics.ThreadWaitReason</c> enum names reported
-/// by the kernel in the context-switch event, with two documented
-/// exceptions produced by <see cref="OffCpuTracker"/>: <c>Preempted</c>
-/// (the thread was switched out while still runnable — scheduling delay,
-/// not a block) and the thread-state name itself for the rare switch-outs
-/// in states other than Wait/Ready.
+/// by the kernel in the context-switch event; values the enum does not
+/// name are mapped through the NT KWAIT_REASON table by
+/// <see cref="OffCpuTracker"/> (WrQueue, WrPushLock, ...), and values
+/// beyond that table appear as <c>WaitReason(&lt;n&gt;)</c>. Two further
+/// labels are produced by the tracker itself: <c>Preempted</c> (the
+/// thread was switched out while still runnable — scheduling delay, not
+/// a block) and the thread-state name itself for the rare switch-outs in
+/// states other than Wait/Ready.
 /// </summary>
 /// <param name="Reason">Wait-reason (or switch-out classification) name.</param>
 /// <param name="Episodes">Off-CPU episodes attributed to this reason.</param>

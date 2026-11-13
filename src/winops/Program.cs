@@ -86,6 +86,7 @@ var processing = Task.Run(() => session.ProcessEvents(cts.Token));
 string limit = seconds > 0 ? $"for {seconds}s" : "until Ctrl+C";
 Console.WriteLine($"winops: watching pid {pid} {limit} " +
                   $"(session '{KernelSession.SessionName}', registry: {(registryActive ? "on" : "off")}).");
+Console.WriteLine("latencies are in microseconds (us); 1000 us = 1 ms");
 
 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 try
