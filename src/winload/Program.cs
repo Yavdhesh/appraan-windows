@@ -1,0 +1,77 @@
+using System.Net;
+using System.Net.Sockets;
+
+// winload — known-workload generator used to verify winscope on Windows.
+// For ~15 s it:
+//   * repeatedly opens loopback TCP connections to a listener it hosts
+//     itself (ephemeral port), exchanges a few bytes both ways;
+//   * repeatedly writes and reads back a temp file;
+//   * sleeps briefly between iterations (low CPU, mostly kernel activity).
+// Expected winscope result for this pid: Tcp counts > 0 AND File counts > 0.
+
+int pid = Environment.ProcessId;
+Console.WriteLine($"winload pid={pid}");
+Console.WriteLine("generating TCP + file workload for ~15 s... watch this pid with winscope.");
+
+var listener = new TcpListener(IPAddress.Loopback, 0);
+listener.Start();
+int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+Console.WriteLine($"listening on 127.0.0.1:{port}");
+
+using var acceptCts = new CancellationTokenSource();
+var acceptLoop = Task.Run(async () =>
+{
+    while (!acceptCts.IsCancellationRequested)
+    {
+        try
+        {
+            using var serverSide = await listener.AcceptTcpClientAsync(acceptCts.Token);
+            var stream = serverSide.GetStream();
+            var buffer = new byte[64];
+            int read = await stream.ReadAsync(buffer, acceptCts.Token);
+            if (read > 0)
+                await stream.WriteAsync(buffer.AsMemory(0, read), acceptCts.Token); // echo back
+        }
+        catch (OperationCanceledException) { break; }
+        catch (SocketException) { break; }
+        catch (ObjectDisposedException) { break; }
+    }
+});
+
+string tempFile = Path.Combine(Path.GetTempPath(), $"winload-{pid}.tmp");
+var payload = new byte[4096];
+Random.Shared.NextBytes(payload);
+
+var deadline = DateTime.UtcNow.AddSeconds(15);
+int iterations = 0;
+while (DateTime.UtcNow < deadline)
+{
+    iterations++;
+
+    // --- TCP: one short-lived loopback connection, small echo exchange ---
+    using (var client = new TcpClient())
+    {
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var stream = client.GetStream();
+        await stream.WriteAsync(payload.AsMemory(0, 32));
+        var reply = new byte[32];
+        await stream.ReadExactlyAsync(reply);
+    }
+
+    // --- File: write the payload, read it back, keep the file for next round ---
+    await File.WriteAllBytesAsync(tempFile, payload);
+    _ = await File.ReadAllBytesAsync(tempFile);
+
+    if (iterations % 10 == 0)
+        Console.WriteLine($"  ...{iterations} iterations");
+
+    await Task.Delay(100);
+}
+
+acceptCts.Cancel();
+listener.Stop();
+try { await acceptLoop; } catch { /* shutdown */ }
+try { File.Delete(tempFile); } catch { /* best effort */ }
+
+Console.WriteLine($"winload done: {iterations} iterations (each = 1 TCP connection + 1 file write + 1 file read).");
+return 0;

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Appraan.Windows</RootNamespace>
+    <AssemblyName>Appraan.Windows</AssemblyName>
+    <!-- ETW only exists on Windows; the code guards for that at runtime so the
+         library still compiles (and unit-testable parts run) anywhere. -->
+    <Description>Windows OS-level observability (ETW kernel tracing) — the Windows equivalent of Linux eBPF/BCC functionality, consumed by Appraan as its Windows collector layer.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- TraceEvent: Microsoft's ETW consumption library (the one PerfView uses). -->
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.8" />
+  </ItemGroup>
+
+</Project>
