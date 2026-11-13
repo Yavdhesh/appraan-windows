@@ -1,5 +1,113 @@
 # Appraan.Windows — STATUS
 
+## Step 4: winoffcpu (off-CPU analysis) — BUILT, compile-verified, runtime UNVERIFIED
+`winoffcpu <PID> [--seconds N]` prints, every 5 s and at exit, the
+process's on-CPU / off-CPU totals and off-CPU %, a wait-reason table
+(reason, episodes, total ms, %), the top threads by off-CPU time
+(TID, episodes, off-CPU ms, max episode ms), and diagnostics. This is
+DESIGN.md item 5 and the Windows form of BCC `offcputime`, minus stack
+capture (stacks stay a later step; the kernel's wait reason stands in
+for "why was it off-CPU").
+
+### TraceEvent 3.1.8 API — verified by reflection, NOT from memory
+- `KernelTraceEventParser.ThreadCSwitch` → `CSwitchTraceData` carries
+  explicit `OldThreadID`/`OldProcessID`/`OldProcessName` and
+  `NewThreadID`/`NewProcessID`/`NewProcessName`, `OldThreadWaitReason`
+  (`System.Diagnostics.ThreadWaitReason`: Executive, FreePage, PageIn,
+  SystemAllocation, ExecutionDelay, Suspended, UserRequest,
+  EventPairHigh, EventPairLow, LpcReceive, LpcReply, VirtualMemory,
+  PageOut, Unknown) and `OldThreadState`
+  (`System.Diagnostics.ThreadState`: Initialized, Ready, Running,
+  Standby, Terminated, Wait, Transition, Unknown), plus priorities,
+  quantum fields and a `NewThreadWaitTime`. It also declares its OWN
+  `ProcessID` property — one more reason attribution in
+  `OffCpuTracker` uses ONLY the payload's Old/New process ids, never
+  the event header.
+- ThreadStart/ThreadStop → `ThreadTraceData`; ProcessStop →
+  `ProcessTraceData`. Lifecycle events carry no old/new pair, so their
+  header ProcessID/ThreadID identify the thread being created or
+  destroyed (same convention as `OpsTracker`).
+
+### Design (OffCpuTracker)
+- Per-thread state machine: a switch-out (thread is the event's Old*)
+  closes its on-CPU interval and opens an off-CPU episode stamped with
+  the switch-out time and a reason label; a switch-in (thread is New*)
+  closes the episode (duration = in − out) and opens an on-CPU
+  interval. Symmetric accounting yields off-CPU % per thread and per
+  process. A switch whose Old and New are the same thread is ignored.
+- Reason label, fixed once at switch-out: OldThreadState = Wait → the
+  kernel wait-reason name (Executive, UserRequest, ...); = Ready →
+  `Preempted` (the thread was runnable but had no CPU — scheduling
+  delay, not a block; folding it into a wait reason would fabricate
+  one); any other state → the state name itself.
+- Window edges: a thread first seen mid-life (ThreadStart not
+  observed — normally it predates the trace) is marked Partial: if
+  first seen switching out, its unknown preceding on-CPU time is not
+  counted; if first seen switching in, no episode is invented for the
+  unobserved past. A thread born in-window (ThreadStart seen) starts
+  clean, neither on- nor off-CPU until its first switch-in.
+  ThreadStop closes a thread's open interval at the stop timestamp and
+  ProcessStop does so for all of the process's threads (such episodes
+  are counted separately in diagnostics as closed-by-exit); exited
+  threads keep contributing their final totals to snapshots.
+  Switch-ins/outs whose matching edge was evidently missed increment
+  diagnostics counters instead of being papered over.
+- Snapshots accrue in-progress intervals provisionally up to the
+  newest context-switch timestamp observed anywhere on the machine
+  (context switches fire constantly, so it tracks "now" in trace
+  time); snapshots never mutate state. The CSwitch handler checks the
+  payload process ids before taking any lock — context switches are
+  the highest-volume kernel event there is.
+- `KernelSession` is unchanged in this step: the Thread group already
+  maps to Thread | ContextSwitch keywords. winoffcpu enables
+  Thread | Process.
+
+### Build (real output, this VM, .NET SDK 8.0.428)
+```
+  Appraan.Windows -> .../src/Appraan.Windows/bin/Release/net8.0/Appraan.Windows.dll
+  winscope -> .../src/winscope/bin/Release/net8.0/winscope.dll
+  winload -> .../src/winload/bin/Release/net8.0/winload.dll
+  wintcplife -> .../src/wintcplife/bin/Release/net8.0/wintcplife.dll
+  winops -> .../src/winops/bin/Release/net8.0/winops.dll
+  winoffcpu -> .../src/winoffcpu/bin/Release/net8.0/winoffcpu.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+```
+(Two compile fixes on the way: `ThreadState` needs an alias —
+`System.Threading` defines one too — and a `double` cannot be
+`volatile` in C#, so the newest-timestamp watermark is a `long` of
+the double's bits, updated via Interlocked.CompareExchange.)
+Linux-side checks: winoffcpu with no args / non-numeric pid / unknown
+flag → usage + exit 2; valid pid off-Windows → platform-guard message
++ exit 1. Sibling behaviours re-checked unchanged (winscope platform
+guard exit 1; wintcplife and winops usage exit 2). ETW runtime
+behaviour remains UNVERIFIED until the run below.
+
+### User test (RUNBOOK.md Step 4) — expected signature vs winload
+Window A: `winload --wait` (note pid). Window B (admin):
+`winoffcpu <pid> --seconds 25`, then Enter in A. winload's shape:
+~15 s of iterations, each = brief TCP-echo + temp-file work followed
+by a 100 ms `Task.Delay`; a handful of threads (main loop, accept
+loop, threadpool workers) that block far more than they run.
+- **STRICT** (must hold or something is wrong):
+  - The report prints all three sections (process totals, wait-reason
+    table, per-thread table) for winload's pid.
+  - Process off-CPU % **> 80%** — winload is idle-dominated.
+  - Max episode **>= 90 ms** — the 100 ms Task.Delay must appear as an
+    off-CPU episode of roughly the delay's length.
+- **INDICATIVE** (expected shape, not pass/fail):
+  - Off-CPU % in fact > 90% aggregated over winload's threads.
+  - Wait reasons dominated by `Executive` (timer/delay waits are the
+    classic Executive case), with `UserRequest` / `EventPair*` present
+    from the async socket/file waits; `Preempted` a small share on an
+    unloaded machine.
+  - Episodes in the **hundreds, not thousands** — winload's threads
+    block for long stretches rather than spinning.
+  - Several threads in the table (main loop, accept loop, threadpool),
+    most marked (partial) — they predate the trace.
+
 ## Step 3: winops (kernel ops by category + latency) — BUILT, compile-verified, runtime UNVERIFIED
 `winops <PID> [--seconds N] [--registry]` prints, every 5 s and at exit, a
 per-category table (COUNT, LAT_OPS, AVG_US, MAX_US) with latency
@@ -210,7 +318,9 @@ TX≈RX≈0.03 KB, NO zero-byte phantom lines, durations ~0.3–0.8 ms, and an
    top of this file (runtime verification on the user's machine pending).
    Note DESIGN.md item 4 (IO latency histograms per process) is already
    delivered inside winops for the File and Disk categories.
-5. Off-CPU (CSwitch + wait reasons; stacks need symbol handling).
+5. Off-CPU (CSwitch + wait reasons) — BUILT, see the Step 4 section at
+   the top of this file (runtime verification on the user's machine
+   pending). Stack capture remains a later step.
 
 ## Step 1: solution skeleton + ETW session plumbing — CODE COMPLETE, COMPILE-VERIFIED
 Finished 2026-11-13 (assistant's Linux VM). Runtime ETW behaviour is still

@@ -363,3 +363,115 @@ design, but paste the warning back verbatim if you see it.
 
 Paste the final winops summary back to Muse Ram — success or failure,
 the exact numbers are what the next step gets built on.
+
+---
+
+# Step 4 — winoffcpu (off-CPU analysis)
+
+Goal of this run: prove the off-CPU view end-to-end. `winoffcpu` watches
+one process's threads through ETW context switches and reports where
+their time goes when they are **not** running — how much, in how many
+episodes, and *why* (the kernel wait reason at each switch-out:
+`Executive`, `UserRequest`, ...). This is the data BCC's `offcputime`
+gives on Linux, minus stack traces (a later step). Same known workload:
+`winload` spends most of its life blocked — a 100 ms `Task.Delay` per
+iteration plus async waits on its loopback echo and temp file — so its
+off-CPU signature is predictable.
+
+Prerequisite: Steps 1–3 passed. Update and rebuild first:
+
+```powershell
+cd appraan-windows          # wherever you cloned it
+git pull
+dotnet build -c Release
+```
+
+Expected: `Build succeeded`, `0 Error(s)`, now for **six** projects
+(the new one is `winoffcpu`).
+
+## Run the test (ADMIN PowerShell, two windows)
+
+**Window A — start the workload, paused** (same as Steps 1–3):
+
+```powershell
+dotnet run -c Release --project src\winload -- --wait
+```
+
+Note the pid it prints and leave the window waiting.
+
+**Window B — profile that pid's off-CPU time:**
+
+```powershell
+dotnet run -c Release --project src\winoffcpu -- 12348 --seconds 25
+```
+
+> Pass the pid as a BARE number right after `--` — `12348`, not
+> `--pid 12348` (winoffcpu takes the pid positionally, like winscope
+> and winops). Wrong arguments print `usage: winoffcpu <PID> [--seconds N]`.
+
+Once winoffcpu prints its first line, go back to Window A and **press
+Enter**. winoffcpu prints a report every 5 s (cumulative) and once more
+at exit.
+
+## What success looks like
+
+Report shape (your numbers will differ — the relationships are the test):
+
+```
+=== winoffcpu summary: pid 12348 over ~25s ===
+on-CPU     412.6 ms   off-CPU    18204.3 ms   off-CPU  97.8%   episodes 486   max episode 108.4 ms
+wait reasons:
+  REASON            EPISODES   TOTAL_MS      %
+  Executive              402    14980.2    82.3
+  UserRequest             61     2890.5    15.9
+  Preempted               18      210.9     1.2
+  ...
+top threads by off-CPU:
+       TID EPISODES  OFFCPU_MS   MAX_MS   ONCPU_MS OFFCPU_%
+     22104      131    9210.4    104.9      180.2     98.1
+     ...
+diagnostics: threads observed=9  partial=8  episodes closed=486 (by thread exit=131)  switch-ins w/o episode=0  switch-outs w/o on-CPU=0  open off-CPU=5  open on-CPU=0
+```
+
+**Strict checks** (these must hold — if not, paste the output back):
+
+- ✅ All three sections print for winload's pid (totals line, wait-reason
+  table, per-thread table).
+- ✅ **Process off-CPU % > 80%** — winload is idle-dominated: brief work
+  per iteration, then it blocks. (Expect it to actually land above 90%.)
+- ✅ **Max episode >= 90 ms** — every iteration ends in a 100 ms
+  `Task.Delay`, and that delay must show up as an off-CPU episode of
+  roughly the delay's length on the main-loop thread.
+
+**Expected shape** (indicative — interesting if different, not a failure):
+
+- Wait reasons dominated by **Executive** (timer and delay waits are the
+  classic Executive case), with **UserRequest** / **EventPair\*** present
+  from the async socket and file waits, and only a small **Preempted**
+  share (Preempted = switched out while still runnable — scheduling
+  delay, which should be rare on an unloaded machine).
+- **Episodes in the hundreds, not thousands** — winload's threads block
+  for long stretches (100 ms at a time), they do not spin.
+- The per-thread table shows several threads (main loop, accept loop,
+  threadpool workers), most marked `(partial)` — they were already alive
+  when the trace started, so their totals cover only the observed
+  window. The thread with the most episodes and ~100 ms max episodes is
+  winload's main loop.
+- Diagnostics: `switch-ins w/o episode` and `switch-outs w/o on-CPU`
+  small or zero (a few can occur at the trace edges). winload exits
+  before winoffcpu's 25 s are up, so expect `episodes closed ... (by
+  thread exit=...)` to be nonzero in the final summary — that is the
+  ThreadStop/ProcessStop path closing out the dying process's threads.
+
+### If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| "Kernel ETW tracing requires an elevated process" | Not an admin PowerShell — reopen elevated, retry. |
+| `usage: winoffcpu <PID> [--seconds N]` | Bad arguments — most likely `--pid 12348` (winoffcpu wants the bare pid) or a missing `--` after `dotnet run ... --`. |
+| "(no threads observed yet)" / zero totals | winload's Enter wasn't pressed while winoffcpu was running, or the pid is wrong. Redo with a fresh `winload -- --wait` and its new pid. |
+| Off-CPU % far below 80%, or max episode far below 90 ms | Paste the full output back, including the `diagnostics:` line — that contradicts winload's known block-mostly behaviour and the switch accounting needs a look. |
+| One thread shows a single very long off-CPU episode | Plausible and usually real: a threadpool worker that blocks once and is never scheduled again accrues one episode until the trace ends or it exits. Episodes only ever open at an observed switch-out — the tool never invents off-CPU time for before the trace started — so a long single episode means the thread genuinely stayed off-CPU. |
+
+Paste the final winoffcpu summary back to Muse Ram — success or failure,
+the exact numbers are what the next step gets built on.

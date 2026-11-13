@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Winoffcpu</RootNamespace>
+    <AssemblyName>winoffcpu</AssemblyName>
+    <Description>Off-CPU analysis per process — where a process's threads spend their time NOT running, and why (ETW context switches + kernel wait reasons), the Windows analogue of BCC offcputime, via Appraan.Windows.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Appraan.Windows\Appraan.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

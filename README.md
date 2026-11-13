@@ -26,6 +26,7 @@ operations by category, with latency*).
 | `winscope` | — (foundation) | Live per-category kernel event counts for one PID (TCP / File / Disk / other) | ✅ verified on Windows 11 |
 | `wintcplife` | `tcplife` | One line per closed TCP connection: endpoints, bytes sent/received, lifetime, retransmits | ✅ verified — byte totals arithmetically exact vs a known workload |
 | `winops` | `syscount` + latency | Kernel operations by category (File, Disk, Network, Process/Thread, optional Registry) with average/max latency and latency histograms for File and Disk | ✅ verified — strict workload checks exact (File.Write = N), latency pairing covers 100% of file ops |
+| `winoffcpu` | `offcputime` | Off-CPU analysis per process from ETW context switches: on/off-CPU totals and %, per-thread off-CPU episodes, and a wait-reason breakdown (why threads were not running) — without stack capture | built, verification in progress |
 | `winload` | — (test workload) | Deterministic TCP + file workload used to verify the tools against known numbers | ✅ |
 
 Every "verified" claim is backed by a run in [`evidence/`](evidence/) —
