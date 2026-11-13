@@ -50,6 +50,21 @@ public sealed class KernelSession : IDisposable
     public bool IsRunning => _session is not null && !_stopping;
 
     /// <summary>
+    /// The raw kernel parser behind this session, for consumers that need
+    /// typed payloads (TCP endpoints, byte counts, ...) beyond the normalised
+    /// <see cref="EventReceived"/> model — e.g. <see cref="TcpConnectionTracker"/>.
+    /// Subscribe handlers after <see cref="Start"/> and before
+    /// <see cref="ProcessEvents"/> starts dispatching; handlers subscribed
+    /// later can miss events. This is purely additive: the normalised
+    /// <see cref="EventReceived"/> wiring is unaffected, and both handler sets
+    /// receive every event.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The session has not been started.</exception>
+    public KernelTraceEventParser KernelParser =>
+        _session?.Source.Kernel
+        ?? throw new InvalidOperationException("Call Start() before accessing KernelParser.");
+
+    /// <summary>
     /// Create (or take over) the ETW session and enable the kernel providers.
     /// Does not consume events yet; call <see cref="ProcessEvents"/> for that.
     /// </summary>

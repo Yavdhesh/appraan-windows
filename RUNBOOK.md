@@ -148,3 +148,81 @@ Tcp=268  File=762  Disk=44  Other=17  Total=1091
 
 Paste the winscope summary back to Muse Ram either way — success or failure,
 the exact output is what the next step gets built on.
+
+---
+
+# Step 2 — wintcplife (tcplife for Windows)
+
+Goal of this run: prove the TCP lifecycle tracking end-to-end. `winload`
+makes short loopback TCP connections; `wintcplife` should print one line
+per connection **when it closes**, with endpoints, TX/RX bytes and lifetime
+— the same report BCC's `tcplife` gives on Linux.
+
+Prerequisite: Step 1 passed (SDK installed, repo cloned, solution builds).
+Start by updating and rebuilding:
+
+```powershell
+cd appraan-windows          # wherever you cloned it
+git pull
+dotnet build -c Release
+```
+
+Expected: `Build succeeded`, `0 Error(s)`, now for **four** projects
+(the new one is `wintcplife`).
+
+## Run the test (ADMIN PowerShell, two windows)
+
+**Window A — start the workload, paused** (same as Step 1):
+
+```powershell
+dotnet run -c Release --project src\winload -- --wait
+```
+
+Note the pid it prints and leave the window waiting.
+
+**Window B — trace that pid's connections:**
+
+```powershell
+dotnet run -c Release --project src\wintcplife -- --pid 12348 --seconds 25
+```
+
+(Use YOUR winload pid, as a bare number after `--pid`.) Once wintcplife
+prints its header, go back to Window A and **press Enter**. wintcplife
+prints a one-line `open connections` summary every 5 s while it runs.
+
+## What success looks like
+
+One line per closed connection, roughly **two lines per winload iteration**
+(winload hosts BOTH ends of each loopback connection — the outbound client
+side and the accepted server side — and both belong to winload's pid):
+
+```
+PID    COMM           LADDR:LPORT              RADDR:RPORT                 TX_KB    RX_KB        MS
+33108  winload        127.0.0.1:61339          127.0.0.1:55453              0.03     0.03       4.2
+33108  winload        127.0.0.1:55453          127.0.0.1:61339              0.03     0.03       4.1
+```
+
+- ✅ **TX_KB ≈ RX_KB ≈ 0.03 per connection** — winload sends exactly 32
+  bytes and reads a 32-byte echo per connection (32 bytes = 0.03 KB; the
+  ETW `size` fields are what get summed, so small deviations are fine and
+  worth pasting back verbatim).
+- ✅ **MS** is small (each connection lives only for one request/echo).
+- ✅ Final summary reports the total connections closed (≈ 2× winload's
+  iteration count), total bytes, and the longest-lived connection, with
+  `still open: 0` or a small number.
+
+Also try it without `--pid` sometime — `wintcplife --seconds 20` shows
+every process's connections on the machine, like the real `tcplife`.
+
+### If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| "Kernel ETW tracing requires an elevated process" | Not an admin PowerShell — reopen elevated, retry. |
+| `usage: wintcplife [--pid N] [--seconds N]` | Bad flag or non-numeric value. Note the `--` before `--pid` is required with `dotnet run` so the flags reach wintcplife, not dotnet. |
+| Header prints but no connection lines | winload's Enter wasn't pressed while wintcplife was running, or the pid is wrong. Redo with a fresh `winload -- --wait` and its new pid. |
+| Lines appear but TX/RX are 0.00 | Paste the output back — that would mean ETW send/recv `size` fields aren't flowing as expected and the byte accounting needs a look. |
+
+Paste the wintcplife output (a few connection lines + the summary) back to
+Muse Ram — success or failure, the exact numbers are what Step 3 gets
+built on.
