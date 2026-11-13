@@ -1,6 +1,6 @@
 # Appraan.Windows — STATUS
 
-## Integration: appraanagent (the Appraan sidecar) — BUILT, compile-verified 2026-11-13; runtime verification pending
+## Integration: appraanagent (the Appraan sidecar) — RUNTIME VERIFIED 2026-11-13
 
 (Renamed from winagent to **appraanagent** at the user's direction,
 2026-11-13, in a dedicated rename commit. The JSON snapshot contract
@@ -74,6 +74,18 @@ Verification on this (Linux) VM — ETW cannot run here, so:
   (Appraan's ingest endpoint) IS live-verified in Appraan's proof run4
   via curl, and the full appraanagent→Appraan loop is the user's two-window
   Windows test (RUNBOOK "Integration — appraanagent").
+
+**RUNTIME VERIFIED 2026-11-13** on the user's Windows 11 (host RADHEY,
+OpenJDK 24.0.2): the full standalone loop — LoadApp pid 43292 →
+appraanagent `--push … --interval 2` (plain mode) → Appraan
+`--seconds 0` → dashboard + /kernel — with cross-checked numbers
+(episodes vs context switches within 0.3%, File latency coverage 100%,
+allocation rate vs total consistent). See
+evidence/2026-11-13-appraanagent-live-loop-verification.md. Two defects
+found by the run and fixed: the bare "9" thread-state label (fc321e4)
+and the dashboard header's STALE flapping (appraan 747698f). Not
+separately confirmed in that run: interactive flame zoom; the kernel
+panel's stale flip after stopping the agent.
 
 ## Step 4: winoffcpu (off-CPU analysis) — RUNTIME VERIFIED 2026-11-13
 
